@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<psalm
+    errorLevel="4"
+    resolveFromConfigFile="true"
+    findUnusedVariablesAndParams="true"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xmlns="https://getpsalm.org/schema/config"
+    xsi:schemaLocation="https://getpsalm.org/schema/config vendor/vimeo/psalm/config.xsd"
+>
+    <projectFiles>
+        <directory name="src" />
+        <ignoreFiles>
+            <directory name="vendor" />
+        </ignoreFiles>
+    </projectFiles>
+
+    <plugins>
+        <pluginClass class="Psalm\PhpUnitPlugin\Plugin"/>
+    </plugins>
+
+    <issueHandlers>
+        <!-- These are public API classes/methods/properties meant for external use -->
+        <UnusedClass>
+            <errorLevel type="suppress">
+                <referencedClass name="OpenTelemetry\Contrib\Metrics\Host\HostMetrics"/>
+            </errorLevel>
+        </UnusedClass>
+        <PossiblyUnusedMethod>
+            <errorLevel type="suppress">
+                <referencedMethod name="OpenTelemetry\Contrib\Metrics\Host\HostMetricsConfig::getMetricGroups"/>
+                <referencedMethod name="OpenTelemetry\Contrib\Metrics\Host\Collector\ProcessMemoryCollector::collectPeak"/>
+                <referencedMethod name="OpenTelemetry\Contrib\Metrics\Host\Collector\ProcessMemoryCollector::collectFromProc"/>
+            </errorLevel>
+        </PossiblyUnusedMethod>
+        <!-- Data classes expose all properties for consumers to read -->
+        <PossiblyUnusedProperty errorLevel="suppress">
+            <errorLevel type="suppress">
+                <directory name="src"/>
+            </errorLevel>
+        </PossiblyUnusedProperty>
+    </issueHandlers>
+</psalm>

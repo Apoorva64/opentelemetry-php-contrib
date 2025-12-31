@@ -1,0 +1,13 @@
+includes:
+    - vendor/phpstan/phpstan-phpunit/extension.neon
+
+parameters:
+    tmpDir: var/cache/phpstan
+    level: 5
+    paths:
+        - src
+        - tests
+    ignoreErrors:
+        # $callbacks property stores references to keep observable callbacks alive
+        - message: '#Property .+HostMetrics::\$callbacks is never read, only written#'
+          path: src/HostMetrics.php
