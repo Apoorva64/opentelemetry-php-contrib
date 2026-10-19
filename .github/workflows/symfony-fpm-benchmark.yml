@@ -1,0 +1,88 @@
+name: Symfony FPM benchmark
+
+# Benchmarks the Symfony auto-instrumentation in a real Symfony app served by PHP-FPM:
+# Symfony without OpenTelemetry (baseline) vs the instrumentation at `base_ref` vs at `head_ref`.
+# Absolute numbers vary between runners; compare variants within the same run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: 'Base git ref (branch, tag or SHA)'
+        required: true
+        default: 'main'
+      head_ref:
+        description: 'Head git ref to compare (empty = the ref this workflow runs on)'
+        required: false
+        default: ''
+      routes:
+        description: 'Number of routes in the app (multiple of 10)'
+        required: true
+        default: '500'
+      duration:
+        description: 'k6 duration per round'
+        required: true
+        default: '15s'
+      rounds:
+        description: 'Interleaved rounds per variant'
+        required: true
+        default: '3'
+      connections:
+        description: 'Concurrent connections'
+        required: true
+        default: '1'
+      profile:
+        description: 'Generate Excimer flamegraphs'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+          tools: composer
+          coverage: none
+
+      - name: Setup k6
+        uses: grafana/setup-k6-action@43b9fc21641a76002687994433dd586f56e791b1 # v1.2.2
+
+      - name: Build Symfony apps
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
+          HEAD_REF: ${{ inputs.head_ref || github.sha }}
+          ROUTES: ${{ inputs.routes }}
+        run: python3 .github/benchmarks/symfony-fpm/build_apps.py
+
+      - name: Run benchmark
+        env:
+          ROUTES: ${{ inputs.routes }}
+          DURATION: ${{ inputs.duration }}
+          ROUNDS: ${{ inputs.rounds }}
+          CONNECTIONS: ${{ inputs.connections }}
+          PROFILE: ${{ inputs.profile }}
+        run: python3 .github/benchmarks/symfony-fpm/run.py
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: symfony-fpm-benchmark
+          path: .github/benchmarks/symfony-fpm/work/results/
+          if-no-files-found: ignore
