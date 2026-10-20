@@ -28,6 +28,24 @@ The following features are supported:
 * Message Bus span creation
 * Message Transport span creation
 
+## HttpClient span lifecycle
+
+Symfony HttpClient responses are lazy: `request()` returns immediately and the transfer only
+progresses while the application calls a response method (or the response is destructed).
+The instrumentation therefore creates **one CLIENT span per request** and keeps it open until
+the response completes. The span ends at the first of:
+
+* `getContent()` / `toArray()` returning or throwing (the response body was received or failed),
+* `getStatusCode()` / `getHeaders()` throwing a transport exception (the headers could not be read),
+* `cancel()` (an intentional cancellation is not reported as an error),
+* the response being destructed or still referenced at script shutdown without its body being read;
+  the span then ends at the last transport activity observed through `on_progress`, not at cleanup time.
+
+When another response drove the transfer to completion earlier, the span ends when the last bytes
+were received rather than when the body is read. Transport errors (before or after the headers)
+and HTTP error statuses (`>= 400`) are recorded on the CLIENT span. Decoding errors from
+`toArray()` are recorded as exception events without marking the span as failed.
+
 ## Installation via composer
 
 ```bash

@@ -1,0 +1,155 @@
+<?php
+
+declare(strict_types=1);
+
+namespace OpenTelemetry\Contrib\Instrumentation\Symfony;
+
+use OpenTelemetry\API\Common\Time\Clock;
+use OpenTelemetry\API\Trace\SpanInterface;
+use OpenTelemetry\API\Trace\StatusCode;
+use OpenTelemetry\SemConv\Attributes\ErrorAttributes;
+use OpenTelemetry\SemConv\Attributes\HttpAttributes;
+use Symfony\Contracts\HttpClient\Exception\HttpExceptionInterface;
+use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
+use Symfony\Contracts\HttpClient\ResponseInterface;
+
+/**
+ * Lifecycle of the CLIENT span of one logical Symfony HttpClient request.
+ *
+ * @internal
+ */
+final class HttpClientRequestState
+{
+    private bool $ended = false;
+    private int $depth = 0;
+    private int $callStart = 0;
+    private ?int $statusCode = null;
+    private int $downloaded = -1;
+    /** Epoch nanos of the last progress (status or body bytes) reported by the transport. */
+    private ?int $lastActivity = null;
+
+    public function __construct(private readonly SpanInterface $span)
+    {
+    }
+
+    public function isEnded(): bool
+    {
+        return $this->ended;
+    }
+
+    public function lastActivity(): ?int
+    {
+        return $this->lastActivity;
+    }
+
+    public function setStatusCode(int $statusCode): void
+    {
+        if ($statusCode > 0) {
+            $this->statusCode = $statusCode;
+        }
+    }
+
+    /**
+     * Called from the on_progress option. Only observes the transfer, never ends the span.
+     */
+    public function onProgress(int $downloaded, array $info): void
+    {
+        $statusCode = $info['http_code'] ?? 0;
+        if (!is_int($statusCode) || $statusCode <= 0) {
+            return;
+        }
+
+        if ($statusCode !== $this->statusCode || $downloaded !== $this->downloaded) {
+            $this->statusCode = $statusCode;
+            $this->downloaded = $downloaded;
+            $this->lastActivity = Clock::getDefault()->now();
+        }
+    }
+
+    public function enterResponseCall(): void
+    {
+        if ($this->depth++ === 0) {
+            $this->callStart = Clock::getDefault()->now();
+        }
+    }
+
+    /**
+     * Whether the outermost response method call just returned.
+     */
+    public function leaveResponseCall(): bool
+    {
+        return $this->depth > 0 && --$this->depth === 0;
+    }
+
+    /**
+     * Whether the transport had already finished receiving the response before the
+     * current outermost response method call started, e.g. because consuming
+     * another response drove this transfer to completion.
+     */
+    public function completedBeforeCall(): bool
+    {
+        return $this->lastActivity !== null && $this->lastActivity < $this->callStart;
+    }
+
+    /**
+     * Ends the span exactly once.
+     */
+    public function finish(?ResponseInterface $response, ?\Throwable $exception = null, ?int $timestamp = null): void
+    {
+        if ($this->ended) {
+            return;
+        }
+        $this->ended = true;
+
+        $info = self::responseInfo($response);
+        $statusCode = $info['http_code'] ?? null;
+        $statusCode = is_int($statusCode) && $statusCode > 0 ? $statusCode : $this->statusCode;
+
+        if ($statusCode !== null) {
+            $this->span->setAttribute(HttpAttributes::HTTP_RESPONSE_STATUS_CODE, $statusCode);
+        }
+
+        // Intentional cancellation is not an error, unless the response was already a failure
+        // (RetryableHttpClient cancels failed attempts before retrying them).
+        if (($info['canceled'] ?? false) === true && ($statusCode === null || $statusCode < 400)) {
+            $this->span->end($timestamp);
+
+            return;
+        }
+
+        if ($exception instanceof TransportExceptionInterface || ($exception !== null && $response === null)) {
+            // The request could not be sent, or the response could not be (fully) received.
+            $this->span
+                ->recordException($exception)
+                ->setAttribute(ErrorAttributes::ERROR_TYPE, $exception::class)
+                ->setStatus(StatusCode::STATUS_ERROR, $exception->getMessage());
+        } elseif ($statusCode !== null && $statusCode >= 400) {
+            if ($exception instanceof HttpExceptionInterface) {
+                $this->span->recordException($exception);
+            }
+            $this->span
+                ->setAttribute(ErrorAttributes::ERROR_TYPE, (string) $statusCode)
+                ->setStatus(StatusCode::STATUS_ERROR);
+        } elseif ($exception !== null) {
+            // e.g. a decoding error from toArray() or a 3xx RedirectionException: the HTTP exchange succeeded.
+            $this->span->recordException($exception);
+        }
+
+        $this->span->end($timestamp);
+    }
+
+    private static function responseInfo(?ResponseInterface $response): array
+    {
+        if ($response === null) {
+            return [];
+        }
+
+        try {
+            $info = $response->getInfo();
+
+            return is_array($info) ? $info : [];
+        } catch (\Throwable) {
+            return [];
+        }
+    }
+}
