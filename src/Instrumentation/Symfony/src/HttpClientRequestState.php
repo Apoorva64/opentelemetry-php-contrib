@@ -27,11 +27,16 @@ final class HttpClientRequestState
     private int $downloaded = -1;
     /** Epoch nanos of the first on_progress call, i.e. when the transport started the transfer. */
     private ?int $firstActivity = null;
+    /** Epoch nanos of the first on_progress call with a status code. */
+    private ?int $headersAt = null;
     /** Epoch nanos of the last progress (status or body bytes) reported by the transport. */
     private ?int $lastActivity = null;
+    /** Epoch nanos when the span was started. */
+    private int $spanStart;
 
     public function __construct(private readonly SpanInterface $span)
     {
+        $this->spanStart = Clock::getDefault()->now();
     }
 
     public function isEnded(): bool
@@ -62,6 +67,8 @@ final class HttpClientRequestState
         if (!is_int($statusCode) || $statusCode <= 0) {
             return;
         }
+
+        $this->headersAt ??= Clock::getDefault()->now();
 
         if ($statusCode !== $this->statusCode || $downloaded !== $this->downloaded) {
             $this->statusCode = $statusCode;
@@ -117,10 +124,34 @@ final class HttpClientRequestState
             // When the transport started and finished the transfer, so queue time
             // (request() -> first progress) is visible in the trace.
             $this->span->addEvent('http.client.request.sent', [], $this->firstActivity);
-            if ($this->lastActivity !== null && $this->lastActivity !== $this->firstActivity) {
-                $this->span->addEvent('http.client.response.received', [], $this->lastActivity);
-            }
         }
+
+        // Transport timings reported by Symfony getInfo(), anchored to the span start so they
+        // show when the network work actually happened relative to request().
+        if (isset($info['namelookup_time']) && $info['namelookup_time'] > 0) {
+            $this->span->addEvent('http.client.dns_resolved', [], $this->nanoOffset($info['namelookup_time']));
+        }
+        if (isset($info['connect_time']) && $info['connect_time'] > 0) {
+            $this->span->addEvent('http.client.connected', [], $this->nanoOffset($info['connect_time']));
+        }
+        if (isset($info['pretransfer_time']) && $info['pretransfer_time'] > 0) {
+            $this->span->addEvent('http.client.request.sent_transport', [], $this->nanoOffset($info['pretransfer_time']));
+        }
+        if ($this->headersAt !== null) {
+            $this->span->addEvent('http.client.response.headers_received', [], $this->headersAt);
+        }
+        if ($this->lastActivity !== null) {
+            $this->span->addEvent('http.client.response.received', [], $this->lastActivity);
+        }
+
+        // Final transport snapshot as attributes.
+        self::setIfPresent($this->span, 'http.response.content_type', $info['content_type'] ?? null);
+        self::setIfPresent($this->span, 'http.response.redirect_count', $info['redirect_count'] ?? null);
+        self::setIfPresent($this->span, 'http.response.body.size', $info['size_download'] ?? null);
+        self::setIfPresent($this->span, 'network.peer.address', $info['primary_ip'] ?? null);
+        self::setIfPresent($this->span, 'network.peer.port', $info['primary_port'] ?? null);
+        self::setIfPresent($this->span, 'http.scheme', isset($info['scheme']) ? strtolower((string) $info['scheme']) : null);
+        self::setIfPresent($this->span, 'network.protocol.version', isset($info['http_version']) ? $this->httpVersion((int) $info['http_version']) : null);
 
         // Intentional cancellation is not an error, unless the response was already a failure
         // (RetryableHttpClient cancels failed attempts before retrying them).
@@ -164,5 +195,35 @@ final class HttpClientRequestState
         } catch (\Throwable) {
             return [];
         }
+    }
+
+    /** Epoch nanos of a Symfony getInfo() timing relative to the span start. */
+    private function nanoOffset(mixed $relativeSeconds): int
+    {
+        if (!is_numeric($relativeSeconds)) {
+            return $this->spanStart;
+        }
+
+        $offset = (float) $relativeSeconds;
+
+        return $this->spanStart + (int) ($offset * 1_000_000_000.0);
+    }
+
+    private static function setIfPresent(\OpenTelemetry\API\Trace\SpanInterface $span, string $attribute, mixed $value): void
+    {
+        if ($value !== null && $value !== '') {
+            /** @var non-empty-string $attribute */
+            $span->setAttribute($attribute, $value);
+        }
+    }
+
+    private function httpVersion(int $version): string
+    {
+        return match ($version) {
+            1 => '1.0',
+            2 => '1.1',
+            3 => '2',
+            default => (string) $version,
+        };
     }
 }

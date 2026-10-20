@@ -49,15 +49,21 @@ and HTTP error statuses (`>= 400`) are recorded on the CLIENT span. Decoding err
 ### Trace events
 
 Because `request()` only schedules the transfer and network I/O starts later (when the application
-drives the transport), the span also carries two events that mark when the transfer actually
-happened, relative to the span start:
+drives the transport), the span carries events that mark when the transfer actually happened,
+relative to the span start:
 
+* `http.client.dns_resolved` — DNS resolution completed (from `getInfo()`),
+* `http.client.connected` — TCP connection established (from `getInfo()`),
+* `http.client.request.sent_transport` — request fully sent (from `getInfo()`),
 * `http.client.request.sent` — the first `on_progress` call, i.e. when the transport started
   processing the request,
+* `http.client.response.headers_received` — the first `on_progress` call with a status code,
 * `http.client.response.received` — the last transport activity observed through `on_progress`.
 
 The gap between the span start and `http.client.request.sent` is the time the request sat queued
-in PHP before any byte was sent.
+in PHP before any byte was sent. The transport timings (`dns_resolved`, `connected`,
+`request.sent_transport`) are measured from the span start, not from Symfony's internal
+`start_time`, so they reflect when the network work actually happened.
 
 ## Installation via composer
 

@@ -130,6 +130,7 @@ final class HttpClientRequestStateTest extends TestCase
         $sentAt = $this->clock->now();
         $this->clock->advance(100);
         $this->state->onProgress(0, ['http_code' => 200]);
+        $headersAt = $this->clock->now();
         $this->clock->advance(100);
         $this->state->onProgress(42, ['http_code' => 200]);
         $receivedAt = $this->clock->now();
@@ -140,8 +141,51 @@ final class HttpClientRequestStateTest extends TestCase
         $events = $this->storage[0]->getEvents();
         $this->assertSame('http.client.request.sent', $events[0]->getName());
         $this->assertSame($sentAt, $events[0]->getEpochNanos());
-        $this->assertSame('http.client.response.received', $events[1]->getName());
-        $this->assertSame($receivedAt, $events[1]->getEpochNanos());
+        $this->assertSame('http.client.response.headers_received', $events[1]->getName());
+        $this->assertSame($headersAt, $events[1]->getEpochNanos());
+        $this->assertSame('http.client.response.received', $events[2]->getName());
+        $this->assertSame($receivedAt, $events[2]->getEpochNanos());
+    }
+
+    public function test_finish_records_transport_timings_as_events(): void
+    {
+        $this->state->onProgress(0, ['http_code' => 200]);
+
+        $this->state->finish($this->response([
+            'http_code' => 200,
+            'namelookup_time' => 0.001,
+            'connect_time' => 0.002,
+            'pretransfer_time' => 0.003,
+        ]));
+
+        $events = $this->storage[0]->getEvents();
+        $names = array_map(static fn ($e) => $e->getName(), $events);
+        $this->assertContains('http.client.dns_resolved', $names);
+        $this->assertContains('http.client.connected', $names);
+        $this->assertContains('http.client.request.sent_transport', $names);
+    }
+
+    public function test_finish_sets_transport_attributes(): void
+    {
+        $this->state->finish($this->response([
+            'http_code' => 200,
+            'content_type' => 'text/html',
+            'redirect_count' => 1,
+            'size_download' => 42,
+            'primary_ip' => '93.184.216.34',
+            'primary_port' => 443,
+            'scheme' => 'HTTPS',
+            'http_version' => 3,
+        ]));
+
+        $attributes = $this->storage[0]->getAttributes();
+        $this->assertSame('text/html', $attributes->get('http.response.content_type'));
+        $this->assertSame(1, $attributes->get('http.response.redirect_count'));
+        $this->assertSame(42, $attributes->get('http.response.body.size'));
+        $this->assertSame('93.184.216.34', $attributes->get('network.peer.address'));
+        $this->assertSame(443, $attributes->get('network.peer.port'));
+        $this->assertSame('https', $attributes->get('http.scheme'));
+        $this->assertSame('2', $attributes->get('network.protocol.version'));
     }
 
     public function test_no_progress_events_without_transfer(): void
