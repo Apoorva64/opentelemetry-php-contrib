@@ -7,6 +7,8 @@ namespace OpenTelemetry\Tests\Instrumentation\Symfony\tests\Integration;
 use ApiPlatform\Symfony\Bundle\Test\Client as ApiPlatformTestClient;
 use OpenTelemetry\API\Trace\StatusCode;
 use OpenTelemetry\Contrib\Instrumentation\Symfony\HttpClientInstrumentation;
+use OpenTelemetry\SDK\Trace\EventInterface;
+use OpenTelemetry\SDK\Trace\ImmutableSpan;
 use OpenTelemetry\SemConv\Attributes\ErrorAttributes;
 use OpenTelemetry\SemConv\Attributes\HttpAttributes;
 use OpenTelemetry\SemConv\Attributes\UrlAttributes;
@@ -92,7 +94,7 @@ final class HttpClientInstrumentationTest extends AbstractTest
         $this->assertCount(1, $this->storage);
 
         $span = $this->storage[0];
-        $event = $span->getEvents()[0];
+        $event = self::exceptionEvents($span)[0];
 
         $this->assertTrue($span->getAttributes()->has(UrlAttributes::URL_FULL));
         $this->assertTrue($span->getAttributes()->has(HttpAttributes::HTTP_REQUEST_METHOD));
@@ -194,7 +196,7 @@ final class HttpClientInstrumentationTest extends AbstractTest
         $this->assertSame(StatusCode::STATUS_ERROR, $span->getStatus()->getCode());
         $this->assertFalse($span->getAttributes()->has(HttpAttributes::HTTP_RESPONSE_STATUS_CODE));
         $this->assertSame(TransportException::class, $span->getAttributes()->get(ErrorAttributes::ERROR_TYPE));
-        $this->assertSame(TransportException::class, $span->getEvents()[0]->getAttributes()->get('exception.type'));
+        $this->assertSame(TransportException::class, self::exceptionEvents($span)[0]->getAttributes()->get('exception.type'));
     }
 
     /**
@@ -216,7 +218,7 @@ final class HttpClientInstrumentationTest extends AbstractTest
         $this->assertSame(200, $span->getAttributes()->get(HttpAttributes::HTTP_RESPONSE_STATUS_CODE));
         $this->assertSame(StatusCode::STATUS_ERROR, $span->getStatus()->getCode());
         $this->assertSame(TransportException::class, $span->getAttributes()->get(ErrorAttributes::ERROR_TYPE));
-        $this->assertCount(1, $span->getEvents());
+        $this->assertCount(1, self::exceptionEvents($span));
     }
 
     /**
@@ -234,7 +236,7 @@ final class HttpClientInstrumentationTest extends AbstractTest
         $span = $this->storage[0];
         $this->assertSame(StatusCode::STATUS_ERROR, $span->getStatus()->getCode());
         $this->assertSame('404', $span->getAttributes()->get(ErrorAttributes::ERROR_TYPE));
-        $this->assertSame(ClientException::class, $span->getEvents()[0]->getAttributes()->get('exception.type'));
+        $this->assertSame(ClientException::class, self::exceptionEvents($span)[0]->getAttributes()->get('exception.type'));
     }
 
     /**
@@ -252,7 +254,7 @@ final class HttpClientInstrumentationTest extends AbstractTest
         $span = $this->storage[0];
         $this->assertSame(StatusCode::STATUS_UNSET, $span->getStatus()->getCode());
         $this->assertFalse($span->getAttributes()->has(ErrorAttributes::ERROR_TYPE));
-        $this->assertCount(1, $span->getEvents());
+        $this->assertCount(1, self::exceptionEvents($span));
     }
 
     /**
@@ -281,7 +283,7 @@ final class HttpClientInstrumentationTest extends AbstractTest
         $this->assertCount(1, $this->storage);
         $span = $this->storage[0];
         $this->assertSame(StatusCode::STATUS_ERROR, $span->getStatus()->getCode());
-        $this->assertSame(ClientException::class, $span->getEvents()[0]->getAttributes()->get('exception.type'));
+        $this->assertSame(ClientException::class, self::exceptionEvents($span)[0]->getAttributes()->get('exception.type'));
     }
 
     /**
@@ -378,5 +380,18 @@ final class HttpClientInstrumentationTest extends AbstractTest
             ['POST','http://localhost:8057/json', Response::HTTP_OK, StatusCode::STATUS_UNSET],
             ['DELETE', 'http://localhost:8057/1', Response::HTTP_OK, StatusCode::STATUS_UNSET],
         ];
+    }
+
+    /**
+     * Only exception events (the lifecycle events added by the instrumentation are filtered out).
+     *
+     * @return list<EventInterface>
+     */
+    private static function exceptionEvents(ImmutableSpan $span): array
+    {
+        return array_values(array_filter(
+            $span->getEvents(),
+            static fn ($event) => $event->getName() === 'exception',
+        ));
     }
 }

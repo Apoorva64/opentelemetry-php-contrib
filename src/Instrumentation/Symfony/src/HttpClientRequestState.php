@@ -25,6 +25,8 @@ final class HttpClientRequestState
     private int $callStart = 0;
     private ?int $statusCode = null;
     private int $downloaded = -1;
+    /** Epoch nanos of the first on_progress call, i.e. when the transport started the transfer. */
+    private ?int $firstActivity = null;
     /** Epoch nanos of the last progress (status or body bytes) reported by the transport. */
     private ?int $lastActivity = null;
 
@@ -55,6 +57,8 @@ final class HttpClientRequestState
     public function onProgress(int $downloaded, array $info): void
     {
         $statusCode = $info['http_code'] ?? 0;
+        $this->firstActivity ??= Clock::getDefault()->now();
+
         if (!is_int($statusCode) || $statusCode <= 0) {
             return;
         }
@@ -107,6 +111,15 @@ final class HttpClientRequestState
 
         if ($statusCode !== null) {
             $this->span->setAttribute(HttpAttributes::HTTP_RESPONSE_STATUS_CODE, $statusCode);
+        }
+
+        if ($this->firstActivity !== null) {
+            // When the transport started and finished the transfer, so queue time
+            // (request() -> first progress) is visible in the trace.
+            $this->span->addEvent('http.client.request.sent', [], $this->firstActivity);
+            if ($this->lastActivity !== null && $this->lastActivity !== $this->firstActivity) {
+                $this->span->addEvent('http.client.response.received', [], $this->lastActivity);
+            }
         }
 
         // Intentional cancellation is not an error, unless the response was already a failure

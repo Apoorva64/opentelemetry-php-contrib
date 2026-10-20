@@ -46,6 +46,19 @@ were received rather than when the body is read. Transport errors (before or aft
 and HTTP error statuses (`>= 400`) are recorded on the CLIENT span. Decoding errors from
 `toArray()` are recorded as exception events without marking the span as failed.
 
+### Trace events
+
+Because `request()` only schedules the transfer and network I/O starts later (when the application
+drives the transport), the span also carries two events that mark when the transfer actually
+happened, relative to the span start:
+
+* `http.client.request.sent` — the first `on_progress` call, i.e. when the transport started
+  processing the request,
+* `http.client.response.received` — the last transport activity observed through `on_progress`.
+
+The gap between the span start and `http.client.request.sent` is the time the request sat queued
+in PHP before any byte was sent.
+
 ## Installation via composer
 
 ```bash

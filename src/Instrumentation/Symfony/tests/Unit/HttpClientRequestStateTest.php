@@ -124,6 +124,34 @@ final class HttpClientRequestStateTest extends TestCase
         $this->assertSame('503', $this->storage[0]->getAttributes()->get(ErrorAttributes::ERROR_TYPE));
     }
 
+    public function test_finish_records_first_and_last_activity_as_events(): void
+    {
+        $this->state->onProgress(0, ['http_code' => 0]);
+        $sentAt = $this->clock->now();
+        $this->clock->advance(100);
+        $this->state->onProgress(0, ['http_code' => 200]);
+        $this->clock->advance(100);
+        $this->state->onProgress(42, ['http_code' => 200]);
+        $receivedAt = $this->clock->now();
+        $this->clock->advance(100);
+
+        $this->state->finish($this->response(['http_code' => 200]));
+
+        $events = $this->storage[0]->getEvents();
+        $this->assertSame('http.client.request.sent', $events[0]->getName());
+        $this->assertSame($sentAt, $events[0]->getEpochNanos());
+        $this->assertSame('http.client.response.received', $events[1]->getName());
+        $this->assertSame($receivedAt, $events[1]->getEpochNanos());
+    }
+
+    public function test_no_progress_events_without_transfer(): void
+    {
+        $this->state->finish(null, new \InvalidArgumentException('Invalid option'));
+
+        $this->assertCount(1, $this->storage[0]->getEvents()); // exception only
+        $this->assertSame('exception', $this->storage[0]->getEvents()[0]->getName());
+    }
+
     public function test_status_code_falls_back_to_progress(): void
     {
         $this->state->onProgress(0, ['http_code' => 502]);
