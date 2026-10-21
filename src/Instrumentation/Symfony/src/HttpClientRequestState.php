@@ -5,10 +5,13 @@ declare(strict_types=1);
 namespace OpenTelemetry\Contrib\Instrumentation\Symfony;
 
 use OpenTelemetry\API\Common\Time\Clock;
+use OpenTelemetry\API\Metrics\HistogramInterface;
 use OpenTelemetry\API\Trace\SpanInterface;
 use OpenTelemetry\API\Trace\StatusCode;
 use OpenTelemetry\SemConv\Attributes\ErrorAttributes;
 use OpenTelemetry\SemConv\Attributes\HttpAttributes;
+use OpenTelemetry\SemConv\Attributes\NetworkAttributes;
+use OpenTelemetry\SemConv\Attributes\ServerAttributes;
 use Symfony\Contracts\HttpClient\Exception\HttpExceptionInterface;
 use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
@@ -33,10 +36,31 @@ final class HttpClientRequestState
     private ?int $lastActivity = null;
     /** Epoch nanos when the span was started. */
     private int $spanStart;
+    /** Base attributes of the http.client.request.duration metric, captured at request time. */
+    private array $metricAttributes;
 
-    public function __construct(private readonly SpanInterface $span)
+    public function __construct(private readonly SpanInterface $span, string $method, string $url)
     {
         $this->spanStart = Clock::getDefault()->now();
+
+        $parts = parse_url($url) ?: [];
+        $scheme = isset($parts['scheme']) ? strtolower((string) $parts['scheme']) : null;
+        $host = isset($parts['host']) ? (string) $parts['host'] : null;
+        $port = isset($parts['port'])
+            ? (int) $parts['port']
+            : ($scheme === 'https' ? 443 : ($scheme === 'http' ? 80 : null));
+
+        $metricAttributes = [HttpAttributes::HTTP_REQUEST_METHOD => $method !== '' ? $method : '_OTHER'];
+        if ($host !== null && $host !== '') {
+            $metricAttributes[ServerAttributes::SERVER_ADDRESS] = $host;
+        }
+        if ($port !== null) {
+            $metricAttributes[ServerAttributes::SERVER_PORT] = $port;
+        }
+        if ($scheme !== null && $scheme !== '') {
+            $metricAttributes['url.scheme'] = $scheme;
+        }
+        $this->metricAttributes = $metricAttributes;
     }
 
     public function isEnded(): bool
@@ -103,9 +127,14 @@ final class HttpClientRequestState
     }
 
     /**
-     * Ends the span exactly once.
+     * Ends the span exactly once, then records the http.client.request.duration
+     * histogram. The duration comes from the transport's own getInfo('total_time'),
+     * so it measures the actual network exchange and excludes the lazy queue time
+     * between request() and the transfer starting.
+     *
+     * @see https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpclientrequestduration
      */
-    public function finish(?ResponseInterface $response, ?\Throwable $exception = null, ?int $timestamp = null): void
+    public function finish(?ResponseInterface $response, ?\Throwable $exception = null, ?int $timestamp = null, ?HistogramInterface $durationHistogram = null): void
     {
         if ($this->ended) {
             return;
@@ -123,25 +152,29 @@ final class HttpClientRequestState
         if ($this->firstActivity !== null) {
             // When the transport started and finished the transfer, so queue time
             // (request() -> first progress) is visible in the trace.
-            $this->span->addEvent('http.client.request.sent', [], $this->firstActivity);
+            $this->span->addEvent('http.getconn', [], $this->firstActivity);
         }
 
         // Transport timings reported by Symfony getInfo(), anchored to the span start so they
         // show when the network work actually happened relative to request().
         if (isset($info['namelookup_time']) && $info['namelookup_time'] > 0) {
-            $this->span->addEvent('http.client.dns_resolved', [], $this->nanoOffset($info['namelookup_time']));
+            $this->span->addEvent('http.dns', [], $this->nanoOffset($info['namelookup_time']));
         }
         if (isset($info['connect_time']) && $info['connect_time'] > 0) {
-            $this->span->addEvent('http.client.connected', [], $this->nanoOffset($info['connect_time']));
+            $this->span->addEvent('http.connect', [], $this->nanoOffset($info['connect_time']));
+        }
+        if (isset($info['appconnect_time']) && $info['appconnect_time'] > 0) {
+            // TLS handshake completed (HTTPS only).
+            $this->span->addEvent('http.tls', [], $this->nanoOffset($info['appconnect_time']));
         }
         if (isset($info['pretransfer_time']) && $info['pretransfer_time'] > 0) {
-            $this->span->addEvent('http.client.request.sent_transport', [], $this->nanoOffset($info['pretransfer_time']));
+            $this->span->addEvent('http.send', [], $this->nanoOffset($info['pretransfer_time']));
         }
         if ($this->headersAt !== null) {
-            $this->span->addEvent('http.client.response.headers_received', [], $this->headersAt);
+            $this->span->addEvent('http.headers', [], $this->headersAt);
         }
         if ($this->lastActivity !== null) {
-            $this->span->addEvent('http.client.response.received', [], $this->lastActivity);
+            $this->span->addEvent('http.receive', [], $this->lastActivity);
         }
 
         // Final transport snapshot as attributes.
@@ -156,17 +189,20 @@ final class HttpClientRequestState
         // Intentional cancellation is not an error, unless the response was already a failure
         // (RetryableHttpClient cancels failed attempts before retrying them).
         if (($info['canceled'] ?? false) === true && ($statusCode === null || $statusCode < 400)) {
-            $this->span->end();
+            $this->span->end($timestamp);
+            $this->recordDuration($durationHistogram, $statusCode, $info, null);
 
             return;
         }
 
+        $errorType = null;
         if ($exception instanceof TransportExceptionInterface || ($exception !== null && $response === null)) {
             // The request could not be sent, or the response could not be (fully) received.
             $this->span
                 ->recordException($exception)
                 ->setAttribute(ErrorAttributes::ERROR_TYPE, $exception::class)
                 ->setStatus(StatusCode::STATUS_ERROR, $exception->getMessage());
+            $errorType = $exception::class;
         } elseif ($statusCode !== null && $statusCode >= 400) {
             if ($exception instanceof HttpExceptionInterface) {
                 $this->span->recordException($exception);
@@ -174,12 +210,42 @@ final class HttpClientRequestState
             $this->span
                 ->setAttribute(ErrorAttributes::ERROR_TYPE, (string) $statusCode)
                 ->setStatus(StatusCode::STATUS_ERROR);
+            $errorType = (string) $statusCode;
         } elseif ($exception !== null) {
             // e.g. a decoding error from toArray() or a 3xx RedirectionException: the HTTP exchange succeeded.
             $this->span->recordException($exception);
         }
 
-        $this->span->end();
+        $this->span->end($timestamp);
+        $this->recordDuration($durationHistogram, $statusCode, $info, $errorType);
+    }
+
+    private function recordDuration(?HistogramInterface $histogram, ?int $statusCode, array $info, ?string $errorType): void
+    {
+        if ($histogram === null || !$histogram->isEnabled()) {
+            return;
+        }
+
+        // Elapsed transfer time as measured by the transport itself. It starts when the
+        // transfer actually begins (after any lazy queueing) and ends when it completes
+        // or fails, which is exactly the duration this metric describes.
+        $totalTime = $info['total_time'] ?? null;
+        if (!is_numeric($totalTime) || (float) $totalTime <= 0.0) {
+            return;
+        }
+
+        $attributes = $this->metricAttributes;
+        if ($statusCode !== null) {
+            $attributes[HttpAttributes::HTTP_RESPONSE_STATUS_CODE] = $statusCode;
+        }
+        if ($errorType !== null) {
+            $attributes[ErrorAttributes::ERROR_TYPE] = $errorType;
+        }
+        if (isset($info['http_version']) && is_numeric($info['http_version'])) {
+            $attributes[NetworkAttributes::NETWORK_PROTOCOL_VERSION] = $this->httpVersion((int) $info['http_version']);
+        }
+
+        $histogram->record((float) $totalTime, $attributes);
     }
 
     private static function responseInfo(?ResponseInterface $response): array

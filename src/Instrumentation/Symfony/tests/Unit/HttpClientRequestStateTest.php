@@ -7,6 +7,7 @@ namespace OpenTelemetry\Tests\Instrumentation\Symfony\tests\Unit;
 use ArrayObject;
 use OpenTelemetry\API\Common\Time\Clock;
 use OpenTelemetry\API\Common\Time\TestClock;
+use OpenTelemetry\API\Metrics\HistogramInterface;
 use OpenTelemetry\API\Trace\StatusCode;
 use OpenTelemetry\Contrib\Instrumentation\Symfony\HttpClientRequestState;
 use OpenTelemetry\SDK\Trace\ImmutableSpan;
@@ -15,6 +16,8 @@ use OpenTelemetry\SDK\Trace\SpanProcessor\SimpleSpanProcessor;
 use OpenTelemetry\SDK\Trace\TracerProvider;
 use OpenTelemetry\SemConv\Attributes\ErrorAttributes;
 use OpenTelemetry\SemConv\Attributes\HttpAttributes;
+use OpenTelemetry\SemConv\Attributes\NetworkAttributes;
+use OpenTelemetry\SemConv\Attributes\ServerAttributes;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpClient\Exception\TransportException;
 use Symfony\Contracts\HttpClient\ResponseInterface;
@@ -35,7 +38,11 @@ final class HttpClientRequestStateTest extends TestCase
         Clock::setDefault($this->clock);
         $this->storage = new ArrayObject();
         $tracerProvider = new TracerProvider(new SimpleSpanProcessor(new InMemoryExporter($this->storage)));
-        $this->state = new HttpClientRequestState($tracerProvider->getTracer('test')->spanBuilder('GET')->startSpan());
+        $this->state = new HttpClientRequestState(
+            $tracerProvider->getTracer('test')->spanBuilder('GET')->startSpan(),
+            'GET',
+            'https://example.com:8443/posts/1',
+        );
     }
 
     public function tearDown(): void
@@ -139,11 +146,11 @@ final class HttpClientRequestStateTest extends TestCase
         $this->state->finish($this->response(['http_code' => 200]));
 
         $events = $this->storage[0]->getEvents();
-        $this->assertSame('http.client.request.sent', $events[0]->getName());
+        $this->assertSame('http.getconn', $events[0]->getName());
         $this->assertSame($sentAt, $events[0]->getEpochNanos());
-        $this->assertSame('http.client.response.headers_received', $events[1]->getName());
+        $this->assertSame('http.headers', $events[1]->getName());
         $this->assertSame($headersAt, $events[1]->getEpochNanos());
-        $this->assertSame('http.client.response.received', $events[2]->getName());
+        $this->assertSame('http.receive', $events[2]->getName());
         $this->assertSame($receivedAt, $events[2]->getEpochNanos());
     }
 
@@ -155,14 +162,16 @@ final class HttpClientRequestStateTest extends TestCase
             'http_code' => 200,
             'namelookup_time' => 0.001,
             'connect_time' => 0.002,
+            'appconnect_time' => 0.0025,
             'pretransfer_time' => 0.003,
         ]));
 
         $events = $this->storage[0]->getEvents();
         $names = array_map(static fn ($e) => $e->getName(), $events);
-        $this->assertContains('http.client.dns_resolved', $names);
-        $this->assertContains('http.client.connected', $names);
-        $this->assertContains('http.client.request.sent_transport', $names);
+        $this->assertContains('http.dns', $names);
+        $this->assertContains('http.connect', $names);
+        $this->assertContains('http.tls', $names);
+        $this->assertContains('http.send', $names);
     }
 
     public function test_finish_sets_transport_attributes(): void
@@ -220,6 +229,146 @@ final class HttpClientRequestStateTest extends TestCase
 
         $this->assertSame(StatusCode::STATUS_ERROR, $this->storage[0]->getStatus()->getCode());
         $this->assertSame(\InvalidArgumentException::class, $this->storage[0]->getAttributes()->get(ErrorAttributes::ERROR_TYPE));
+    }
+
+    public function test_finish_records_duration_histogram(): void
+    {
+        $captured = [];
+        $histogram = $this->createMock(HistogramInterface::class);
+        $histogram->method('isEnabled')->willReturn(true);
+        $histogram->method('record')->willReturnCallback(static function (float $duration, iterable $attributes) use (&$captured): void {
+            $captured[] = [$duration, $attributes];
+        });
+
+        // The duration comes from the transport's total_time, not the clock.
+        $this->state->finish($this->response([
+            'http_code' => 200,
+            'http_version' => 3,
+            'total_time' => 0.25,
+        ]), null, null, $histogram);
+
+        // Second finish on the ended state records nothing.
+        $this->state->finish($this->response(['http_code' => 200, 'total_time' => 9.0]), null, null, $histogram);
+
+        $this->assertCount(1, $captured);
+        [$duration, $attributes] = $captured[0];
+        $this->assertEqualsWithDelta(0.25, $duration, 1e-9);
+        $this->assertSame(200, $attributes[HttpAttributes::HTTP_RESPONSE_STATUS_CODE]);
+    }
+
+    public function test_finish_records_duration_with_expected_attributes(): void
+    {
+        $captured = [];
+        $histogram = $this->createMock(HistogramInterface::class);
+        $histogram->method('isEnabled')->willReturn(true);
+        $histogram->method('record')->willReturnCallback(static function (float $duration, iterable $attributes) use (&$captured): void {
+            $captured = [$duration, $attributes];
+        });
+
+        $this->state->finish($this->response([
+            'http_code' => 200,
+            'http_version' => 3,
+            'total_time' => 1.5,
+        ]), null, null, $histogram);
+
+        $this->assertNotEmpty($captured);
+        [$duration, $attributes] = $captured;
+        $this->assertEqualsWithDelta(1.5, $duration, 1e-9);
+        $this->assertSame('GET', $attributes[HttpAttributes::HTTP_REQUEST_METHOD]);
+        $this->assertSame('example.com', $attributes[ServerAttributes::SERVER_ADDRESS]);
+        $this->assertSame(8443, $attributes[ServerAttributes::SERVER_PORT]);
+        $this->assertSame('https', $attributes['url.scheme']);
+        $this->assertSame(200, $attributes[HttpAttributes::HTTP_RESPONSE_STATUS_CODE]);
+        $this->assertSame('2', $attributes[NetworkAttributes::NETWORK_PROTOCOL_VERSION]);
+        $this->assertArrayNotHasKey(ErrorAttributes::ERROR_TYPE, $attributes);
+    }
+
+    public function test_finish_records_duration_with_error_type(): void
+    {
+        $captured = [];
+        $histogram = $this->createMock(HistogramInterface::class);
+        $histogram->method('isEnabled')->willReturn(true);
+        $histogram->method('record')->willReturnCallback(static function (float $duration, iterable $attributes) use (&$captured): void {
+            $captured = [$duration, $attributes];
+        });
+
+        $this->state->finish(
+            $this->response(['http_code' => 503, 'total_time' => 0.1]),
+            null,
+            null,
+            $histogram,
+        );
+
+        $this->assertNotEmpty($captured);
+        [$duration, $attributes] = $captured;
+        $this->assertEqualsWithDelta(0.1, $duration, 1e-9);
+        $this->assertSame('503', $attributes[ErrorAttributes::ERROR_TYPE]);
+        $this->assertSame(503, $attributes[HttpAttributes::HTTP_RESPONSE_STATUS_CODE]);
+    }
+
+    public function test_finish_records_duration_with_transport_error(): void
+    {
+        $captured = [];
+        $histogram = $this->createMock(HistogramInterface::class);
+        $histogram->method('isEnabled')->willReturn(true);
+        $histogram->method('record')->willReturnCallback(static function (float $duration, iterable $attributes) use (&$captured): void {
+            $captured = [$duration, $attributes];
+        });
+
+        $this->state->finish($this->response(['total_time' => 0.05]), new TransportException('connection refused'), null, $histogram);
+
+        $this->assertNotEmpty($captured);
+        [$duration, $attributes] = $captured;
+        $this->assertEqualsWithDelta(0.05, $duration, 1e-9);
+        $this->assertSame(TransportException::class, $attributes[ErrorAttributes::ERROR_TYPE]);
+        $this->assertArrayNotHasKey(HttpAttributes::HTTP_RESPONSE_STATUS_CODE, $attributes);
+    }
+
+    public function test_finish_records_duration_of_abandoned_response_from_transport_time(): void
+    {
+        $captured = [];
+        $histogram = $this->createMock(HistogramInterface::class);
+        $histogram->method('isEnabled')->willReturn(true);
+        $histogram->method('record')->willReturnCallback(static function (float $duration, iterable $attributes) use (&$captured): void {
+            $captured = [$duration, $attributes];
+        });
+
+        $this->state->onProgress(0, ['http_code' => 200]);
+        $this->clock->advanceSeconds(1);
+        $this->state->onProgress(42, ['http_code' => 200]);
+        // Abandoned responses end at their last transport activity, but the duration
+        // still comes from the transport's own total_time.
+        $this->state->finish($this->response(['http_code' => 200, 'total_time' => 0.75]), null, $this->state->lastActivity(), $histogram);
+
+        $this->assertNotEmpty($captured);
+        [$duration, $attributes] = $captured;
+        $this->assertEqualsWithDelta(0.75, $duration, 1e-9);
+    }
+
+    public function test_finish_skips_metric_without_transport_time(): void
+    {
+        $histogram = $this->createMock(HistogramInterface::class);
+        $histogram->method('isEnabled')->willReturn(true);
+        $histogram->expects($this->never())->method('record');
+
+        // No response (request() itself threw) and no total_time: nothing to measure.
+        $this->state->finish(null, new TransportException('connection refused'), null, $histogram);
+    }
+
+    public function test_disabled_histogram_is_not_recorded(): void
+    {
+        $histogram = $this->createMock(HistogramInterface::class);
+        $histogram->method('isEnabled')->willReturn(false);
+        $histogram->expects($this->never())->method('record');
+
+        $this->state->finish($this->response(['http_code' => 200, 'total_time' => 0.1]), null, null, $histogram);
+    }
+
+    public function test_no_histogram_is_accepted(): void
+    {
+        $this->state->finish($this->response(['http_code' => 200, 'total_time' => 0.1]));
+
+        $this->assertCount(1, $this->storage);
     }
 
     private function response(array $info): ResponseInterface

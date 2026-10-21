@@ -6,6 +6,7 @@ namespace OpenTelemetry\Contrib\Instrumentation\Symfony;
 
 use OpenTelemetry\API\Globals;
 use OpenTelemetry\API\Instrumentation\CachedInstrumentation;
+use OpenTelemetry\API\Metrics\HistogramInterface;
 use OpenTelemetry\API\Trace\SpanKind;
 use OpenTelemetry\Context\Context;
 use OpenTelemetry\Context\ContextInterface;
@@ -45,8 +46,16 @@ final class HttpClientInstrumentation
      */
     private const RESPONSE_METHODS = ['getStatusCode', 'getHeaders', 'getContent', 'toArray', 'cancel', '__destruct'];
 
+    /**
+     * Explicit buckets of the http.client.request.duration histogram, in seconds.
+     *
+     * @see https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpclientrequestduration
+     */
+    private const DURATION_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0];
+
     /** @var \WeakMap<ResponseInterface, HttpClientRequestState>|null */
     private static ?\WeakMap $responseStates = null;
+    private static ?HistogramInterface $durationHistogram = null;
 
     public static function supportsProgress(string $class): bool
     {
@@ -97,6 +106,12 @@ final class HttpClientInstrumentation
 
         self::registerRequestHook($instrumentation);
         self::registerResponseHooks();
+        self::$durationHistogram = $instrumentation->meter()->createHistogram(
+            'http.client.request.duration',
+            's',
+            'Duration of HTTP client requests.',
+            ['ExplicitBucketBoundaries' => self::DURATION_BUCKETS],
+        );
 
         // Responses still referenced at the end of the script are only destructed after all
         // shutdown functions ran, i.e. after the SDK flushed and shut down its TracerProvider.
@@ -111,7 +126,7 @@ final class HttpClientInstrumentation
     public static function endOpenSpans(): void
     {
         foreach (self::responseStates() as $response => $state) {
-            $state->finish($response, null, $state->lastActivity());
+            $state->finish($response, null, $state->lastActivity(), self::$durationHistogram);
         }
     }
 
@@ -151,7 +166,7 @@ final class HttpClientInstrumentation
                     ->setAttribute(CodeAttributes::CODE_LINE_NUMBER, $lineno)
                     ->setParent($parent)
                     ->startSpan();
-                $state = new HttpClientRequestState($span);
+                $state = new HttpClientRequestState($span, (string) $params[0], (string) $params[1]);
 
                 $requestOptions = $params[2] ?? [];
                 if (!isset($requestOptions['headers'])) {
@@ -206,7 +221,7 @@ final class HttpClientInstrumentation
                 }
 
                 if (null !== $exception || null === $response) {
-                    $state->finish(null, $exception);
+                    $state->finish(null, $exception, null, self::$durationHistogram);
 
                     return;
                 }
@@ -217,7 +232,7 @@ final class HttpClientInstrumentation
                         $state->setStatusCode($response->getStatusCode());
                     } catch (\Throwable) {
                     }
-                    $state->finish($response);
+                    $state->finish($response, null, null, self::$durationHistogram);
 
                     return;
                 }
@@ -266,18 +281,18 @@ final class HttpClientInstrumentation
             case 'getHeaders':
                 // Headers were read: keep the span open for the body, unless reading them failed.
                 if ($exception instanceof TransportExceptionInterface) {
-                    $state->finish($response, $exception);
+                    $state->finish($response, $exception, null, self::$durationHistogram);
                 }
 
                 return;
             case '__destruct':
                 // The body was not (observably) consumed: end at the last transport activity rather
                 // than at cleanup time, unless sending the request from the destructor failed.
-                $state->finish($response, $exception, null === $exception ? $state->lastActivity() : null);
+                $state->finish($response, $exception, null === $exception ? $state->lastActivity() : null, self::$durationHistogram);
 
                 return;
             case 'cancel':
-                $state->finish($response, $exception);
+                $state->finish($response, $exception, null, self::$durationHistogram);
 
                 return;
             default:
@@ -286,7 +301,7 @@ final class HttpClientInstrumentation
                 $timestamp = $state->completedBeforeCall() && !$exception instanceof TransportExceptionInterface
                     ? $state->lastActivity()
                     : null;
-                $state->finish($response, $exception, $timestamp);
+                $state->finish($response, $exception, $timestamp, self::$durationHistogram);
         }
     }
 
