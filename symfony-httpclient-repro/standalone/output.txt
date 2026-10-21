@@ -1,0 +1,70 @@
+
+## curl
+1. connection refused, getContent()
+    app saw: TransportException, exported spans: 0
+2. 200 then truncated body, getContent()
+    app saw: TransportException, exported spans: 1
+    span /broken-body status=Unset http.response.status_code=200 error.type=- exception events=[] start=+0.000s duration=0.002s
+    server received /broken-body       at +0.001s
+3. HTTP 500, getContent()
+    app saw: ServerException, exported spans: 1
+    span /500        status=Error http.response.status_code=500 error.type=- exception events=[] start=+0.000s duration=0.001s
+    server received /500               at +0.001s
+4. 302 -> 200 redirect, getContent()
+    app saw: -, exported spans: 1
+    span /redirect   status=Unset http.response.status_code=302 error.type=- exception events=[] start=+0.000s duration=0.001s
+    server received /redirect          at +0.001s
+    server received /fast              at +0.002s
+5. 1 s response body, getContent()
+    app saw: -, exported spans: 1
+    span /slow-body  status=Unset http.response.status_code=200 error.type=- exception events=[] start=+0.000s duration=0.001s
+    server received /slow-body         at +0.001s
+6. request(), sleep(2), getContent()
+    app saw: -, exported spans: 1
+    span /fast       status=Unset http.response.status_code=200 error.type=- exception events=[] start=+0.000s duration=2.002s
+    server received /fast              at +2.002s
+7. r1 + r2 scheduled, sleep(2), r1->getContent(), sleep(2), r2->getContent()
+    app saw: -, exported spans: 2
+    span /fast       status=Unset http.response.status_code=200 error.type=- exception events=[] start=+0.000s duration=2.002s
+    span /slow-body  status=Unset http.response.status_code=200 error.type=- exception events=[] start=+0.000s duration=2.002s
+    r1->getContent() called            at +2.001s
+    server received /fast              at +2.002s
+    server received /slow-body         at +2.002s
+    r2 headers received                at +2.002s
+    r2->getContent() called            at +4.003s
+    r2 body fully received             at +4.003s
+
+## native
+1. connection refused, getContent()
+    app saw: TransportException, exported spans: 0
+2. 200 then truncated body, getContent()
+    app saw: TransportException, exported spans: 1
+    span /broken-body status=Unset http.response.status_code=200 error.type=- exception events=[] start=+0.000s duration=0.001s
+    server received /broken-body       at +0.000s
+3. HTTP 500, getContent()
+    app saw: ServerException, exported spans: 1
+    span /500        status=Error http.response.status_code=500 error.type=- exception events=[] start=+0.000s duration=0.001s
+    server received /500               at +0.000s
+4. 302 -> 200 redirect, getContent()
+    app saw: -, exported spans: 1
+    span /redirect   status=Unset http.response.status_code=302 error.type=- exception events=[] start=+0.000s duration=0.001s
+    server received /redirect          at +0.000s
+    server received /fast              at +0.001s
+5. 1 s response body, getContent()
+    app saw: -, exported spans: 1
+    span /slow-body  status=Unset http.response.status_code=200 error.type=- exception events=[] start=+0.000s duration=0.000s
+    server received /slow-body         at +0.000s
+6. request(), sleep(2), getContent()
+    app saw: -, exported spans: 1
+    span /fast       status=Unset http.response.status_code=200 error.type=- exception events=[] start=+0.000s duration=2.001s
+    server received /fast              at +2.001s
+7. r1 + r2 scheduled, sleep(2), r1->getContent(), sleep(2), r2->getContent()
+    app saw: -, exported spans: 2
+    span /fast       status=Unset http.response.status_code=200 error.type=- exception events=[] start=+0.000s duration=2.002s
+    span /slow-body  status=Unset http.response.status_code=200 error.type=- exception events=[] start=+0.000s duration=4.003s
+    r1->getContent() called            at +2.001s
+    server received /fast              at +2.001s
+    r2->getContent() called            at +4.002s
+    server received /slow-body         at +4.003s
+    r2 headers received                at +4.003s
+    r2 body fully received             at +5.003s

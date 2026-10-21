@@ -1,0 +1,18 @@
+
+=== 01 request() schedules, the response methods execute (IMPL=none, PHP 8.3.6)
+
+-- curl: request(/fast), sleep(2), getContent()
+   0.001s request() returned
+   2.002s calling getContent()
+   2.002s on_progress http_code=0 dlNow=0
+   2.004s on_progress http_code=200 dlNow=2
+   2.004s getContent() returned (getInfo total_time=0.0019s)
+   2.003s SERVER received /fast
+
+-- native: request(/fast), sleep(2), getContent()
+   0.001s request() returned
+   2.001s calling getContent()
+   2.001s on_progress http_code=0 dlNow=0
+   2.003s on_progress http_code=200 dlNow=2
+   2.003s getContent() returned (getInfo total_time=0.0019s)
+   2.003s SERVER received /fast

@@ -1,0 +1,65 @@
+
+=== 02 on_progress signals and exception sites (IMPL=none, PHP 8.3.6)
+
+######## curl
+-- concurrent: A=/slow-body, B=/fast; consume A, sleep(1), consume B
+   0.003s [A] on_progress http_code=0 dlNow=0/0 error=null
+   0.003s [B] on_progress http_code=0 dlNow=0/0 error=null
+   0.005s [A] on_progress http_code=200 dlNow=0/10 error=null
+   1.005s [A] on_progress http_code=200 dlNow=10/10 error=null
+   1.006s A consumed
+   2.006s [B] on_progress http_code=200 dlNow=2/0 error=null
+   2.007s B consumed
+-- refused: getStatusCode() then getContent()
+   0.000s [refused] on_progress http_code=0 dlNow=0/0 error=null
+   0.001s getStatusCode() threw TransportException: Failed to connect to 127.0.0.1 port 1 after 0 ms: Couldn't connect to server for "http://127.0.0.1:1/".
+   0.001s getContent() threw TransportException: Failed to connect to 127.0.0.1 port 1 after 0 ms: Couldn't connect to server for "http://127.0.0.1:1/".
+  getInfo: error="Failed to connect to 127.0.0.1 port 1 after 0 ms: Couldn't connect to server for \"http:\/\/127.0.0.1:1\/\"." http_code=0
+-- broken-body: getStatusCode() then getContent()
+   0.000s [broken-body] on_progress http_code=0 dlNow=0/0 error=null
+   0.001s [broken-body] on_progress http_code=200 dlNow=7/100 error=null
+   0.001s getStatusCode() -> 200
+   0.001s getContent() threw TransportException: Transfer closed with 93 bytes remaining to read for "http://127.0.0.1:8765/broken-body".
+  getInfo: error="Transfer closed with 93 bytes remaining to read for \"http:\/\/127.0.0.1:8765\/broken-body\"." http_code=200
+-- 500: getStatusCode() then getContent()
+   0.000s [500] on_progress http_code=0 dlNow=0/0 error=null
+   0.001s [500] on_progress http_code=500 dlNow=4/0 error=null
+   0.001s getStatusCode() -> 500
+   0.001s getContent() threw ServerException: HTTP/1.1 500 Internal Server Error returned for "http://127.0.0.1:8765/500".
+  getInfo: error=null http_code=500
+-- fire-and-forget: request(/500) and drop the response
+   0.000s [ff] on_progress http_code=0 dlNow=0/0 error=null
+   0.001s [ff] on_progress http_code=500 dlNow=4/0 error=null
+   0.001s destructor threw ServerException: HTTP/1.1 500 Internal Server Error returned for "http://127.0.0.1:8765/500".
+
+######## native
+-- concurrent: A=/slow-body, B=/fast; consume A, sleep(1), consume B
+   0.001s [A] on_progress http_code=0 dlNow=0/0 error=null
+   0.002s [A] on_progress http_code=200 dlNow=0/10 error=null
+   1.002s [A] on_progress http_code=200 dlNow=10/10 error=null
+   1.003s A consumed
+   2.003s [B] on_progress http_code=0 dlNow=0/0 error=null
+   2.005s [B] on_progress http_code=200 dlNow=2/0 error=null
+   2.005s B consumed
+-- refused: getStatusCode() then getContent()
+   0.000s [refused] on_progress http_code=0 dlNow=0/0 error=null
+   0.000s getStatusCode() threw TransportException: fopen(http://127.0.0.1:1/): Failed to open stream: Connection refused
+   0.000s getContent() threw TransportException: fopen(http://127.0.0.1:1/): Failed to open stream: Connection refused
+  getInfo: error="fopen(http:\/\/127.0.0.1:1\/): Failed to open stream: Connection refused" http_code=0
+-- broken-body: getStatusCode() then getContent()
+   0.000s [broken-body] on_progress http_code=0 dlNow=0/0 error=null
+   0.001s [broken-body] on_progress http_code=200 dlNow=7/100 error=null
+   0.001s getStatusCode() -> 200
+   0.001s [broken-body] on_progress http_code=200 dlNow=100/100 error=null
+   0.001s getContent() threw TransportException: Transfer closed with 93 bytes remaining to read.
+  getInfo: error="Transfer closed with 93 bytes remaining to read." http_code=200
+-- 500: getStatusCode() then getContent()
+   0.000s [500] on_progress http_code=0 dlNow=0/0 error=null
+   0.001s [500] on_progress http_code=500 dlNow=4/0 error=null
+   0.001s getStatusCode() -> 500
+   0.001s getContent() threw ServerException: HTTP/1.1 500 Internal Server Error returned for "http://127.0.0.1:8765/500".
+  getInfo: error=null http_code=500
+-- fire-and-forget: request(/500) and drop the response
+   0.000s [ff] on_progress http_code=0 dlNow=0/0 error=null
+   0.001s [ff] on_progress http_code=500 dlNow=4/0 error=null
+   0.001s destructor threw ServerException: HTTP/1.1 500 Internal Server Error returned for "http://127.0.0.1:8765/500".

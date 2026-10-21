@@ -1,0 +1,13 @@
+{
+    "require": {
+        "open-telemetry/opentelemetry-auto-symfony": "1.6.1",
+        "open-telemetry/sdk": "^1.8",
+        "symfony/http-client": "^8.1"
+    },
+    "config": {
+        "allow-plugins": {
+            "php-http/discovery": false,
+            "tbachert/spi": false
+        }
+    }
+}

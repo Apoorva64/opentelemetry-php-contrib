@@ -1,0 +1,14 @@
+
+=== 07 span timing of the two-request example (IMPL=main, PHP 8.3.6)
+
+-- curl
+  SERVER received /fast       at  2.007s
+  SERVER received /slow-body  at  2.007s
+  /fast       CLIENT GET    start=0.003s end=2.008s status=Unset http=200  error.type=-                    events=[]
+  /slow-body  CLIENT GET    start=0.005s end=2.008s status=Unset http=200  error.type=-                    events=[]
+
+-- native
+  SERVER received /fast       at  2.002s
+  SERVER received /slow-body  at  4.004s
+  /fast       CLIENT GET    start=0.000s end=2.002s status=Unset http=200  error.type=-                    events=[]
+  /slow-body  CLIENT GET    start=0.001s end=4.004s status=Unset http=200  error.type=-                    events=[]

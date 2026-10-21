@@ -1,0 +1,92 @@
+
+=== 05 exported spans per scenario (IMPL=branch, PHP 8.3.6)
+
+######## curl
+getContent() 200                                     exported=1
+    CLIENT GET    dur=    4ms status=Unset http=200  error.type=-                    events=[]
+request(), sleep(1), getContent()                    exported=1
+    CLIENT GET    dur= 1002ms status=Unset http=200  error.type=-                    events=[]
+1 s body: getContent()                               exported=1
+    CLIENT GET    dur= 1002ms status=Unset http=200  error.type=-                    events=[]
+1 s body: getStatusCode(), then getContent()         exported=1
+    CLIENT GET    dur= 1002ms status=Unset http=200  error.type=-                    events=[]
+connection refused: getContent()                     exported=1 (application saw TransportException)
+    CLIENT GET    dur=    1ms status=Error http=-    error.type=TransportException   events=[TransportException]
+200 then truncated body                              exported=1 (application saw TransportException)
+    CLIENT GET    dur=    1ms status=Error http=200  error.type=TransportException   events=[TransportException]
+500: getContent()                                    exported=1 (application saw ServerException)
+    CLIENT GET    dur=    1ms status=Error http=500  error.type=500                  events=[ServerException]
+500: getContent(false)                               exported=1
+    CLIENT GET    dur=    1ms status=Error http=500  error.type=500                  events=[]
+302 -> 200 redirect: getContent()                    exported=1
+    CLIENT GET    dur=    2ms status=Unset http=200  error.type=-                    events=[]
+fire-and-forget 200 (destructor)                     exported=1
+    CLIENT GET    dur=    1ms status=Unset http=200  error.type=-                    events=[]
+fire-and-forget 500 (destructor throws)              exported=1 (application saw ServerException)
+    CLIENT GET    dur=    1ms status=Error http=500  error.type=500                  events=[ServerException]
+$client->stream() only                               exported=1
+    CLIENT GET    dur=    1ms status=Unset http=200  error.type=-                    events=[]
+concurrent A (1 s body) + B: consume A then B        exported=2
+    CLIENT GET    dur= 1002ms status=Unset http=200  error.type=-                    events=[]
+    CLIENT GET    dur=    1ms status=Unset http=200  error.type=-                    events=[]
+getStatusCode(), keep response 1 s, drop it          exported=1
+    CLIENT GET    dur=    1ms status=Unset http=200  error.type=-                    events=[]
+cancel() after getStatusCode()                       exported=1
+    CLIENT GET    dur=    1ms status=Unset http=200  error.type=-                    events=[]
+toArray() on non-JSON 200                            exported=1 (application saw JsonException)
+    CLIENT GET    dur=    1ms status=Unset http=200  error.type=-                    events=[JsonException]
+TraceableHttpClient getContent()                     exported=1
+    CLIENT GET    dur=    1ms status=Unset http=200  error.type=-                    events=[]
+RetryableHttpClient 500, 2 retries, 200 ms back-off  exported=3 (application saw ServerException)
+    CLIENT GET    dur=  198ms status=Error http=500  error.type=500                  events=[]
+    CLIENT GET    dur=  399ms status=Error http=500  error.type=500                  events=[ServerException]
+    CLIENT GET    dur=  199ms status=Error http=500  error.type=500                  events=[]
+
+######## native
+getContent() 200                                     exported=1
+    CLIENT GET    dur=    2ms status=Unset http=200  error.type=-                    events=[]
+request(), sleep(1), getContent()                    exported=1
+    CLIENT GET    dur= 1002ms status=Unset http=200  error.type=-                    events=[]
+1 s body: getContent()                               exported=1
+    CLIENT GET    dur= 1002ms status=Unset http=200  error.type=-                    events=[]
+1 s body: getStatusCode(), then getContent()         exported=1
+    CLIENT GET    dur= 1002ms status=Unset http=200  error.type=-                    events=[]
+connection refused: getContent()                     exported=1 (application saw TransportException)
+    CLIENT GET    dur=    0ms status=Error http=-    error.type=TransportException   events=[TransportException]
+200 then truncated body                              exported=1 (application saw TransportException)
+    CLIENT GET    dur=    1ms status=Error http=200  error.type=TransportException   events=[TransportException]
+500: getContent()                                    exported=1 (application saw ServerException)
+    CLIENT GET    dur=    1ms status=Error http=500  error.type=500                  events=[ServerException]
+500: getContent(false)                               exported=1
+    CLIENT GET    dur=    1ms status=Error http=500  error.type=500                  events=[]
+302 -> 200 redirect: getContent()                    exported=1
+    CLIENT GET    dur=    1ms status=Unset http=200  error.type=-                    events=[]
+fire-and-forget 200 (destructor)                     exported=1
+    CLIENT GET    dur=    1ms status=Unset http=200  error.type=-                    events=[]
+fire-and-forget 500 (destructor throws)              exported=1 (application saw ServerException)
+    CLIENT GET    dur=    1ms status=Error http=500  error.type=500                  events=[ServerException]
+$client->stream() only                               exported=1
+    CLIENT GET    dur=    1ms status=Unset http=200  error.type=-                    events=[]
+concurrent A (1 s body) + B: consume A then B        exported=2
+    CLIENT GET    dur= 1002ms status=Unset http=200  error.type=-                    events=[]
+    CLIENT GET    dur= 1002ms status=Unset http=200  error.type=-                    events=[]
+getStatusCode(), keep response 1 s, drop it          exported=1
+    CLIENT GET    dur=    1ms status=Unset http=200  error.type=-                    events=[]
+cancel() after getStatusCode()                       exported=1
+    CLIENT GET    dur=    1ms status=Unset http=200  error.type=-                    events=[]
+toArray() on non-JSON 200                            exported=1 (application saw JsonException)
+    CLIENT GET    dur=    1ms status=Unset http=200  error.type=-                    events=[JsonException]
+TraceableHttpClient getContent()                     exported=1
+    CLIENT GET    dur=    1ms status=Unset http=200  error.type=-                    events=[]
+RetryableHttpClient 500, 2 retries, 200 ms back-off  exported=3 (application saw ServerException)
+    CLIENT GET    dur= 1002ms status=Error http=500  error.type=500                  events=[]
+    CLIENT GET    dur= 2004ms status=Error http=500  error.type=500                  events=[ServerException]
+    CLIENT GET    dur= 1001ms status=Error http=500  error.type=500                  events=[]
+
+######## other clients
+MockHttpClient getContent()                          exported=1
+    CLIENT GET    dur=    0ms status=Unset http=200  error.type=-                    events=[]
+MockHttpClient fire-and-forget                       exported=1
+    CLIENT GET    dur=    0ms status=Unset http=200  error.type=-                    events=[]
+synchronous client (API Platform test client)        exported=1
+    CLIENT GET    dur=    0ms status=Unset http=200  error.type=-                    events=[]

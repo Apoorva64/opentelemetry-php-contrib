@@ -1,0 +1,42 @@
+
+=== 03 request / network start / headers / completion timestamps (IMPL=none, PHP 8.3.6)
+
+-- curl
+  SERVER received /fast       at  2.003s
+  SERVER received /slow-body  at  2.003s
+  r1:
+    request()               0.000s
+    getContent() called     2.002s
+    first on_progress       2.002s
+    headers                 2.003s
+    last body bytes         2.003s
+    getContent() returned   2.003s
+    getInfo: start_time= 0.001s total_time=0.0016s pretransfer_time=0.0007s starttransfer_time=0.0011s
+  r2:
+    request()               0.001s
+    first on_progress       2.002s
+    headers                 2.003s
+    getContent() called     4.004s
+    last body bytes         4.004s
+    getContent() returned   4.004s
+    getInfo: start_time= 0.001s total_time=2.0017s pretransfer_time=0.0005s starttransfer_time=0.0013s
+
+-- native
+  SERVER received /fast       at  2.003s
+  SERVER received /slow-body  at  4.005s
+  r1:
+    request()               0.000s
+    getContent() called     2.001s
+    first on_progress       2.001s
+    headers                 2.003s
+    last body bytes         2.003s
+    getContent() returned   2.003s
+    getInfo: start_time= 2.001s total_time=0.0018s pretransfer_time=0.0017s starttransfer_time=0.0017s
+  r2:
+    request()               0.001s
+    getContent() called     4.003s
+    first on_progress       4.004s
+    headers                 4.005s
+    last body bytes         5.006s
+    getContent() returned   5.006s
+    getInfo: start_time= 4.003s total_time=1.0024s pretransfer_time=0.0019s starttransfer_time=0.0018s

@@ -1,0 +1,18 @@
+
+=== 06 redirects and retries (IMPL=branch, PHP 8.3.6)
+
+-- curl
+  302 -> 200 redirect:
+    CLIENT GET    dur=    4ms status=Unset http=200  error.type=-                    events=[]
+  RetryableHttpClient 500, 2 retries, 200 ms back-off (times relative to the root span):
+    GET#0 parent=root  CLIENT GET    start=0.002s end=0.198s status=Error http=500  error.type=500                  events=[]
+    GET#1 parent=root  CLIENT GET    start=0.001s end=0.400s status=Error http=500  error.type=500                  events=[ServerException]
+    GET#2 parent=root  CLIENT GET    start=0.199s end=0.399s status=Error http=500  error.type=500                  events=[]
+
+-- native
+  302 -> 200 redirect:
+    CLIENT GET    dur=    2ms status=Unset http=200  error.type=-                    events=[]
+  RetryableHttpClient 500, 2 retries, 200 ms back-off (times relative to the root span):
+    GET#0 parent=root  CLIENT GET    start=0.001s end=1.003s status=Error http=500  error.type=500                  events=[]
+    GET#1 parent=root  CLIENT GET    start=0.000s end=2.004s status=Error http=500  error.type=500                  events=[ServerException]
+    GET#2 parent=root  CLIENT GET    start=1.003s end=2.004s status=Error http=500  error.type=500                  events=[]

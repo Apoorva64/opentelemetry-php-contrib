@@ -156,7 +156,7 @@ final class HttpClientRequestState
         // Intentional cancellation is not an error, unless the response was already a failure
         // (RetryableHttpClient cancels failed attempts before retrying them).
         if (($info['canceled'] ?? false) === true && ($statusCode === null || $statusCode < 400)) {
-            $this->span->end($timestamp);
+            $this->span->end();
 
             return;
         }
@@ -179,7 +179,7 @@ final class HttpClientRequestState
             $this->span->recordException($exception);
         }
 
-        $this->span->end($timestamp);
+        $this->span->end();
     }
 
     private static function responseInfo(?ResponseInterface $response): array

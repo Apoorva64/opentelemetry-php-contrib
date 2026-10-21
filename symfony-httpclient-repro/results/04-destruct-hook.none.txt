@@ -1,0 +1,24 @@
+
+=== 04 hooking ResponseInterface::__destruct (IMPL=none, PHP 8.3.6)
+-- curl: request(/500) and drop the response
+  pre  __destruct CurlResponse
+  post __destruct CurlResponse exception=ServerException
+  application caught ServerException
+-- native: request(/500) and drop the response
+  pre  __destruct NativeResponse
+  post __destruct NativeResponse exception=ServerException
+  application caught ServerException
+-- mock: request(/500) and drop the response
+  pre  __destruct MockResponse
+  post __destruct MockResponse exception=-
+  pre  __destruct MockResponse
+  post __destruct MockResponse exception=-
+  no exception
+-- traceable(native): request(/500) and drop the response
+  pre  __destruct TraceableResponse
+  pre  __destruct NativeResponse
+  post __destruct NativeResponse exception=ServerException
+  post __destruct TraceableResponse exception=ServerException
+  application caught ServerException
+  pre  __destruct NativeResponse
+  post __destruct NativeResponse exception=-
