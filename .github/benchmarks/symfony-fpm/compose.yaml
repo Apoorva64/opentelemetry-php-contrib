@@ -13,6 +13,8 @@ x-fpm: &fpm
     OTEL_PROPAGATORS: tracecontext
     OTEL_PHP_SYMFONY_ROUTE_PATH_CACHE: true
     PROFILE: "0"
+    OTEL_PHP_DETECTORS: "env"
+    
 
 x-build: &build
   context: .
