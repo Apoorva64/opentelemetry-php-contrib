@@ -1,0 +1,67 @@
+name: symfony-fpm-bench
+
+x-fpm: &fpm
+  cpus: ${FPM_CPUS:-2}
+  environment: &env
+    APP_ENV: prod
+    APP_DEBUG: "0"
+    APP_SECRET: bench
+    OTEL_PHP_AUTOLOAD_ENABLED: "true"
+    OTEL_TRACES_EXPORTER: none
+    OTEL_METRICS_EXPORTER: none
+    OTEL_LOGS_EXPORTER: none
+    OTEL_PROPAGATORS: tracecontext
+    OTEL_PHP_SYMFONY_ROUTE_PATH_CACHE: true
+    PROFILE: "0"
+    OTEL_PHP_DETECTORS: "env"
+    
+
+x-build: &build
+  context: .
+  dockerfile: docker/Dockerfile
+
+services:
+  # Symfony without OpenTelemetry (extension unloaded, instrumentation disabled)
+  fpm-baseline:
+    <<: *fpm
+    image: symfony-fpm-bench:base
+    environment:
+      <<: *env
+      OTEL_EXT: "off"
+      OTEL_SDK_DISABLED: "true"
+      OTEL_PHP_DISABLED_INSTRUMENTATIONS: symfony
+    depends_on: [fpm-base]
+
+  fpm-base:
+    <<: *fpm
+    image: symfony-fpm-bench:base
+    build: { <<: *build, target: fpm, args: { APP: base } }
+    environment: { <<: *env, OTEL_SERVICE_NAME: bench-base }
+
+  fpm-head:
+    <<: *fpm
+    image: symfony-fpm-bench:head
+    build: { <<: *build, target: fpm, args: { APP: head } }
+    environment: { <<: *env, OTEL_SERVICE_NAME: bench-head }
+
+  prof-base:
+    <<: *fpm
+    profiles: [prof]
+    image: symfony-fpm-bench:base-prof
+    build: { <<: *build, target: prof, args: { APP: base } }
+    environment: { <<: *env, OTEL_SERVICE_NAME: bench-base, PROFILE: "1" }
+    volumes: ["./work/prof/base:/prof"]
+
+  prof-head:
+    <<: *fpm
+    profiles: [prof]
+    image: symfony-fpm-bench:head-prof
+    build: { <<: *build, target: prof, args: { APP: head } }
+    environment: { <<: *env, OTEL_SERVICE_NAME: bench-head, PROFILE: "1" }
+    volumes: ["./work/prof/head:/prof"]
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes: ["./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro"]
+    ports: ["127.0.0.1:${BENCH_PORT_PREFIX:-1818}0-${BENCH_PORT_PREFIX:-1818}4:8080-8084"]
+    depends_on: [fpm-baseline, fpm-base, fpm-head]
