@@ -52,7 +52,6 @@ final class HttpClientRequestState
         private readonly SpanInterface $span,
         string $method,
         string $url,
-        private readonly ?HttpClientPeerServiceResolver $peerServiceResolver = null,
     ) {
         $this->spanStart = Clock::getDefault()->now();
         $this->method = $method;

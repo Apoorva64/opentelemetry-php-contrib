@@ -233,7 +233,7 @@ final class HttpClientInstrumentation
                 $span = $builder
                     ->setParent($parent)
                     ->startSpan();
-                $state = new HttpClientRequestState($span, (string) $params[0], (string) $params[1], $peerServiceResolver);
+                $state = new HttpClientRequestState($span, (string) $params[0], (string) $params[1]);
 
                 $requestOptions = $params[2] ?? [];
                 if (!isset($requestOptions['headers'])) {
