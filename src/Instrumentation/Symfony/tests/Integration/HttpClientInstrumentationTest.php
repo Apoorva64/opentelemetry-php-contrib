@@ -11,8 +11,8 @@ use OpenTelemetry\SDK\Trace\EventInterface;
 use OpenTelemetry\SDK\Trace\ImmutableSpan;
 use OpenTelemetry\SemConv\Attributes\ErrorAttributes;
 use OpenTelemetry\SemConv\Attributes\HttpAttributes;
+use OpenTelemetry\SemConv\Attributes\ServerAttributes;
 use OpenTelemetry\SemConv\Attributes\UrlAttributes;
-use OpenTelemetry\SemConv\TraceAttributes;
 use OpenTelemetry\Tests\Instrumentation\Symfony\tests\Integration\Fixtures\ForwardingHttpClient;
 use Symfony\Component\HttpClient\CurlHttpClient;
 use Symfony\Component\HttpClient\Exception\ClientException;
@@ -67,8 +67,9 @@ final class HttpClientInstrumentationTest extends AbstractTest
         $span = $this->storage[0];
 
         $this->assertStringContainsString($method, $span->getName());
-        $this->assertTrue($span->getAttributes()->has(TraceAttributes::PEER_SERVICE));
-        $this->assertSame(parse_url($uri)['host'] ?? null, $span->getAttributes()->get(TraceAttributes::PEER_SERVICE));
+        $this->assertTrue($span->getAttributes()->has(ServerAttributes::SERVER_ADDRESS));
+        $this->assertSame(parse_url($uri)['host'] ?? null, $span->getAttributes()->get(ServerAttributes::SERVER_ADDRESS));
+        $this->assertSame(parse_url($uri)['port'] ?? null, $span->getAttributes()->get(ServerAttributes::SERVER_PORT));
         $this->assertTrue($span->getAttributes()->has(UrlAttributes::URL_FULL));
         $this->assertSame($uri, $span->getAttributes()->get(UrlAttributes::URL_FULL));
         $this->assertTrue($span->getAttributes()->has(HttpAttributes::HTTP_REQUEST_METHOD));

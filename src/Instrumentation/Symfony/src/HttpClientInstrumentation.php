@@ -15,8 +15,6 @@ use OpenTelemetry\Context\Propagation\ArrayAccessGetterSetter;
 use function OpenTelemetry\Instrumentation\hook;
 use OpenTelemetry\SemConv\Attributes\CodeAttributes;
 use OpenTelemetry\SemConv\Attributes\HttpAttributes;
-use OpenTelemetry\SemConv\Attributes\UrlAttributes;
-use OpenTelemetry\SemConv\TraceAttributes;
 use OpenTelemetry\SemConv\Version;
 use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
@@ -148,22 +146,28 @@ final class HttpClientInstrumentation
                 $request = sprintf('%s %s', $params[0], (string) $params[1]);
 
                 if ($parent->get(self::requestKey()) === $request) {
+                    $state = $parent->get(self::stateKey());
+                    if ($state instanceof HttpClientRequestState) {
+                        $state->onForwardedRequest();
+                    }
                     Context::storage()->attach($parent->with(self::forwardedKey(), true));
 
                     return $params;
                 }
 
                 /** @psalm-suppress ArgumentTypeCoercion */
-                $span = $instrumentation
+                $builder = $instrumentation
                     ->tracer()
-                    ->spanBuilder(\sprintf('%s', $params[0]))
+                    ->spanBuilder((string) $params[0])
                     ->setSpanKind(SpanKind::KIND_CLIENT)
-                    ->setAttribute(TraceAttributes::PEER_SERVICE, parse_url((string) $params[1])['host'] ?? null)
-                    ->setAttribute(UrlAttributes::URL_FULL, (string) $params[1])
                     ->setAttribute(HttpAttributes::HTTP_REQUEST_METHOD, $params[0])
                     ->setAttribute(CodeAttributes::CODE_FUNCTION_NAME, sprintf('%s::%s', $class, $function))
                     ->setAttribute(CodeAttributes::CODE_FILE_PATH, $filename)
-                    ->setAttribute(CodeAttributes::CODE_LINE_NUMBER, $lineno)
+                    ->setAttribute(CodeAttributes::CODE_LINE_NUMBER, $lineno);
+                foreach (HttpClientRequestAttributes::forUrl((string) $params[1]) as $name => $value) {
+                    $builder->setAttribute($name, $value);
+                }
+                $span = $builder
                     ->setParent($parent)
                     ->startSpan();
                 $state = new HttpClientRequestState($span, (string) $params[0], (string) $params[1]);

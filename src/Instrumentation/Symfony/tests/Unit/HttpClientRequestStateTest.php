@@ -18,6 +18,7 @@ use OpenTelemetry\SemConv\Attributes\ErrorAttributes;
 use OpenTelemetry\SemConv\Attributes\HttpAttributes;
 use OpenTelemetry\SemConv\Attributes\NetworkAttributes;
 use OpenTelemetry\SemConv\Attributes\ServerAttributes;
+use OpenTelemetry\SemConv\Attributes\UrlAttributes;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpClient\Exception\TransportException;
 use Symfony\Contracts\HttpClient\ResponseInterface;
@@ -191,9 +192,9 @@ final class HttpClientRequestStateTest extends TestCase
         $this->assertSame('text/html', $attributes->get('http.response.content_type'));
         $this->assertSame(1, $attributes->get('http.response.redirect_count'));
         $this->assertSame(42, $attributes->get('http.response.body.size'));
-        $this->assertSame('93.184.216.34', $attributes->get('network.peer.address'));
-        $this->assertSame(443, $attributes->get('network.peer.port'));
-        $this->assertSame('https', $attributes->get('http.scheme'));
+        $this->assertSame('93.184.216.34', $attributes->get(NetworkAttributes::NETWORK_PEER_ADDRESS));
+        $this->assertSame(443, $attributes->get(NetworkAttributes::NETWORK_PEER_PORT));
+        $this->assertSame('https', $attributes->get(UrlAttributes::URL_SCHEME));
         $this->assertSame('2', $attributes->get('network.protocol.version'));
     }
 
@@ -212,6 +213,30 @@ final class HttpClientRequestStateTest extends TestCase
         $this->state->finish($this->response([]));
 
         $this->assertSame(502, $this->storage[0]->getAttributes()->get(HttpAttributes::HTTP_RESPONSE_STATUS_CODE));
+        $this->assertSame(StatusCode::STATUS_ERROR, $this->storage[0]->getStatus()->getCode());
+    }
+
+    public function test_forwarded_request_before_transfer_is_not_a_resend(): void
+    {
+        // A pass-through decorator calls its wrapped client synchronously, before any
+        // transport activity: not a retry.
+        $this->state->onForwardedRequest();
+
+        $this->state->finish($this->response(['http_code' => 200]));
+
+        $this->assertFalse($this->storage[0]->getAttributes()->has(HttpAttributes::HTTP_REQUEST_RESEND_COUNT));
+    }
+
+    public function test_forwarded_request_after_transfer_is_a_resend(): void
+    {
+        $this->state->onProgress(0, ['http_code' => 500]);
+        $this->state->onForwardedRequest(); // first retry
+        $this->state->onProgress(1024, ['http_code' => 500]);
+        $this->state->onForwardedRequest(); // second retry
+
+        $this->state->finish($this->response(['http_code' => 500]));
+
+        $this->assertSame(2, $this->storage[0]->getAttributes()->get(HttpAttributes::HTTP_REQUEST_RESEND_COUNT));
         $this->assertSame(StatusCode::STATUS_ERROR, $this->storage[0]->getStatus()->getCode());
     }
 

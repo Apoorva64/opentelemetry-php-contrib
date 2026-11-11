@@ -46,6 +46,19 @@ were received rather than when the body is read. Transport errors (before or aft
 and HTTP error statuses (`>= 400`) are recorded on the CLIENT span. Decoding errors from
 `toArray()` are recorded as exception events without marking the span as failed.
 
+### Span attributes
+
+The span records `url.full`, `server.address`, `server.port` (the port from the URL, defaulting
+to 80/443 for http/https), `http.request.method`, and code attributes. Retried requests
+(e.g. by `RetryableHttpClient`) are a single span with `http.request.resend_count` recording the
+number of retries.
+
+`url.full` is redacted before it is recorded: userinfo in the authority is replaced with
+`REDACTED`, and the values of well-known sensitive query parameters (`token`, `api_key`,
+`access_token`, `password`, `secret`, …) are replaced with `REDACTED`. Additional parameter
+names can be redacted via the `OTEL_PHP_INSTRUMENTATION_URL_SANITIZE_FIELD_NAMES` environment
+variable (comma-separated, case-insensitive).
+
 ### Trace events
 
 Because `request()` only schedules the transfer and network I/O starts later (when the application

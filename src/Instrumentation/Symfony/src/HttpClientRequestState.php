@@ -12,6 +12,7 @@ use OpenTelemetry\SemConv\Attributes\ErrorAttributes;
 use OpenTelemetry\SemConv\Attributes\HttpAttributes;
 use OpenTelemetry\SemConv\Attributes\NetworkAttributes;
 use OpenTelemetry\SemConv\Attributes\ServerAttributes;
+use OpenTelemetry\SemConv\Attributes\UrlAttributes;
 use Symfony\Contracts\HttpClient\Exception\HttpExceptionInterface;
 use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
@@ -28,6 +29,8 @@ final class HttpClientRequestState
     private int $callStart = 0;
     private ?int $statusCode = null;
     private int $downloaded = -1;
+    /** Number of retries of this request observed as nested request calls, e.g. by RetryableHttpClient. */
+    private int $resends = 0;
     /** Epoch nanos of the first on_progress call, i.e. when the transport started the transfer. */
     private ?int $firstActivity = null;
     /** Epoch nanos of the first on_progress call with a status code. */
@@ -58,7 +61,7 @@ final class HttpClientRequestState
             $metricAttributes[ServerAttributes::SERVER_PORT] = $port;
         }
         if ($scheme !== null && $scheme !== '') {
-            $metricAttributes['url.scheme'] = $scheme;
+            $metricAttributes[UrlAttributes::URL_SCHEME] = $scheme;
         }
         $this->metricAttributes = $metricAttributes;
     }
@@ -98,6 +101,20 @@ final class HttpClientRequestState
             $this->statusCode = $statusCode;
             $this->downloaded = $downloaded;
             $this->lastActivity = Clock::getDefault()->now();
+        }
+    }
+
+    /**
+     * A request call nested inside an already-instrumented request is either a pass-through
+     * decorator synchronously calling its wrapped client, or a retry of the same request
+     * (e.g. by RetryableHttpClient). Pass-through decorators call the wrapped client before
+     * any transport activity, so a nested call observed after the transfer started is counted
+     * as a resend.
+     */
+    public function onForwardedRequest(): void
+    {
+        if ($this->firstActivity !== null) {
+            $this->resends++;
         }
     }
 
@@ -148,6 +165,9 @@ final class HttpClientRequestState
         if ($statusCode !== null) {
             $this->span->setAttribute(HttpAttributes::HTTP_RESPONSE_STATUS_CODE, $statusCode);
         }
+        if ($this->resends > 0) {
+            $this->span->setAttribute(HttpAttributes::HTTP_REQUEST_RESEND_COUNT, $this->resends);
+        }
 
         if ($this->firstActivity !== null) {
             // When the transport started and finished the transfer, so queue time
@@ -181,9 +201,9 @@ final class HttpClientRequestState
         self::setIfPresent($this->span, 'http.response.content_type', $info['content_type'] ?? null);
         self::setIfPresent($this->span, 'http.response.redirect_count', $info['redirect_count'] ?? null);
         self::setIfPresent($this->span, 'http.response.body.size', $info['size_download'] ?? null);
-        self::setIfPresent($this->span, 'network.peer.address', $info['primary_ip'] ?? null);
-        self::setIfPresent($this->span, 'network.peer.port', $info['primary_port'] ?? null);
-        self::setIfPresent($this->span, 'http.scheme', isset($info['scheme']) ? strtolower((string) $info['scheme']) : null);
+        self::setIfPresent($this->span, NetworkAttributes::NETWORK_PEER_ADDRESS, $info['primary_ip'] ?? null);
+        self::setIfPresent($this->span, NetworkAttributes::NETWORK_PEER_PORT, $info['primary_port'] ?? null);
+        self::setIfPresent($this->span, UrlAttributes::URL_SCHEME, isset($info['scheme']) ? strtolower((string) $info['scheme']) : null);
         self::setIfPresent($this->span, 'network.protocol.version', isset($info['http_version']) ? $this->httpVersion((int) $info['http_version']) : null);
 
         // Intentional cancellation is not an error, unless the response was already a failure
