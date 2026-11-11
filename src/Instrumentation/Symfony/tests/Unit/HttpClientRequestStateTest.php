@@ -9,6 +9,7 @@ use OpenTelemetry\API\Common\Time\Clock;
 use OpenTelemetry\API\Common\Time\TestClock;
 use OpenTelemetry\API\Metrics\HistogramInterface;
 use OpenTelemetry\API\Trace\StatusCode;
+use OpenTelemetry\Contrib\Instrumentation\Symfony\HttpClientMetrics;
 use OpenTelemetry\Contrib\Instrumentation\Symfony\HttpClientRequestState;
 use OpenTelemetry\SDK\Trace\ImmutableSpan;
 use OpenTelemetry\SDK\Trace\SpanExporter\InMemoryExporter;
@@ -19,6 +20,7 @@ use OpenTelemetry\SemConv\Attributes\HttpAttributes;
 use OpenTelemetry\SemConv\Attributes\NetworkAttributes;
 use OpenTelemetry\SemConv\Attributes\ServerAttributes;
 use OpenTelemetry\SemConv\Attributes\UrlAttributes;
+use OpenTelemetry\SemConv\Incubating\Attributes\HttpIncubatingAttributes;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpClient\Exception\TransportException;
 use Symfony\Contracts\HttpClient\ResponseInterface;
@@ -186,16 +188,74 @@ final class HttpClientRequestStateTest extends TestCase
             'primary_port' => 443,
             'scheme' => 'HTTPS',
             'http_version' => 3,
-        ]));
+        ]), null, null, new HttpClientMetrics());
 
         $attributes = $this->storage[0]->getAttributes();
         $this->assertSame('text/html', $attributes->get('http.response.content_type'));
         $this->assertSame(1, $attributes->get('http.response.redirect_count'));
-        $this->assertSame(42, $attributes->get('http.response.body.size'));
+        // Experimental body-size attributes are only recorded with experimental telemetry.
+        $this->assertFalse($attributes->has(HttpIncubatingAttributes::HTTP_RESPONSE_BODY_SIZE));
+        $this->assertFalse($attributes->has(HttpIncubatingAttributes::HTTP_REQUEST_BODY_SIZE));
         $this->assertSame('93.184.216.34', $attributes->get(NetworkAttributes::NETWORK_PEER_ADDRESS));
         $this->assertSame(443, $attributes->get(NetworkAttributes::NETWORK_PEER_PORT));
         $this->assertSame('https', $attributes->get(UrlAttributes::URL_SCHEME));
         $this->assertSame('2', $attributes->get('network.protocol.version'));
+    }
+
+    public function test_finish_records_experimental_telemetry(): void
+    {
+        $durationCaptures = [];
+        $requestBodyCaptures = [];
+        $responseBodyCaptures = [];
+        $histogram = function (array &$captured): HistogramInterface {
+            $h = $this->createMock(HistogramInterface::class);
+            $h->method('isEnabled')->willReturn(true);
+            $h->method('record')->willReturnCallback(static function (float $value, array $attributes) use (&$captured): void {
+                $captured[] = [$value, $attributes];
+            });
+
+            return $h;
+        };
+
+        $this->state->finish($this->response([
+            'http_code' => 200,
+            'size_download' => 42,
+            'size_upload' => 3,
+            'total_time' => 0.1,
+        ]), null, null, new HttpClientMetrics(
+            $histogram($durationCaptures),
+            $histogram($requestBodyCaptures),
+            $histogram($responseBodyCaptures),
+        ));
+
+        $attributes = $this->storage[0]->getAttributes();
+        $this->assertSame(42.0, $attributes->get(HttpIncubatingAttributes::HTTP_RESPONSE_BODY_SIZE));
+        $this->assertSame(3.0, $attributes->get(HttpIncubatingAttributes::HTTP_REQUEST_BODY_SIZE));
+
+        $this->assertCount(1, $durationCaptures);
+        [$duration] = $durationCaptures[0];
+        $this->assertEqualsWithDelta(0.1, $duration, 1e-9);
+        $this->assertSame([3.0], array_column($requestBodyCaptures, 0));
+        $this->assertSame([42.0], array_column($responseBodyCaptures, 0));
+    }
+
+    public function test_finish_records_response_body_size_from_progress_without_info(): void
+    {
+        $captured = [];
+        $responseBody = $this->createMock(HistogramInterface::class);
+        $responseBody->method('isEnabled')->willReturn(true);
+        $responseBody->method('record')->willReturnCallback(static function (float $value, array $attributes) use (&$captured): void {
+            $captured[] = [$value, $attributes];
+        });
+
+        // A MockHttpClient's response has no size_download in its info: fall back to the
+        // bytes observed through on_progress.
+        $this->state->onProgress(13, ['http_code' => 200]);
+        $this->state->finish($this->response(['http_code' => 200]), null, null, new HttpClientMetrics(null, null, $responseBody));
+
+        $this->assertCount(1, $captured);
+        $this->assertSame(13.0, array_column($captured, 0)[0]);
+        $this->assertSame(200, array_column($captured, 1)[0][HttpAttributes::HTTP_RESPONSE_STATUS_CODE] ?? null);
     }
 
     public function test_no_progress_events_without_transfer(): void
@@ -270,10 +330,10 @@ final class HttpClientRequestStateTest extends TestCase
             'http_code' => 200,
             'http_version' => 3,
             'total_time' => 0.25,
-        ]), null, null, $histogram);
+        ]), null, null, new HttpClientMetrics($histogram));
 
         // Second finish on the ended state records nothing.
-        $this->state->finish($this->response(['http_code' => 200, 'total_time' => 9.0]), null, null, $histogram);
+        $this->state->finish($this->response(['http_code' => 200, 'total_time' => 9.0]), null, null, new HttpClientMetrics($histogram));
 
         $this->assertCount(1, $captured);
         [$duration, $attributes] = $captured[0];
@@ -294,7 +354,7 @@ final class HttpClientRequestStateTest extends TestCase
             'http_code' => 200,
             'http_version' => 3,
             'total_time' => 1.5,
-        ]), null, null, $histogram);
+        ]), null, null, new HttpClientMetrics($histogram));
 
         $this->assertNotEmpty($captured);
         [$duration, $attributes] = $captured;
@@ -321,7 +381,7 @@ final class HttpClientRequestStateTest extends TestCase
             $this->response(['http_code' => 503, 'total_time' => 0.1]),
             null,
             null,
-            $histogram,
+            new HttpClientMetrics($histogram),
         );
 
         $this->assertNotEmpty($captured);
@@ -340,7 +400,7 @@ final class HttpClientRequestStateTest extends TestCase
             $captured = [$duration, $attributes];
         });
 
-        $this->state->finish($this->response(['total_time' => 0.05]), new TransportException('connection refused'), null, $histogram);
+        $this->state->finish($this->response(['total_time' => 0.05]), new TransportException('connection refused'), null, new HttpClientMetrics($histogram));
 
         $this->assertNotEmpty($captured);
         [$duration, $attributes] = $captured;
@@ -363,7 +423,7 @@ final class HttpClientRequestStateTest extends TestCase
         $this->state->onProgress(42, ['http_code' => 200]);
         // Abandoned responses end at their last transport activity, but the duration
         // still comes from the transport's own total_time.
-        $this->state->finish($this->response(['http_code' => 200, 'total_time' => 0.75]), null, $this->state->lastActivity(), $histogram);
+        $this->state->finish($this->response(['http_code' => 200, 'total_time' => 0.75]), null, $this->state->lastActivity(), new HttpClientMetrics($histogram));
 
         $this->assertNotEmpty($captured);
         [$duration, $attributes] = $captured;
@@ -377,7 +437,7 @@ final class HttpClientRequestStateTest extends TestCase
         $histogram->expects($this->never())->method('record');
 
         // No response (request() itself threw) and no total_time: nothing to measure.
-        $this->state->finish(null, new TransportException('connection refused'), null, $histogram);
+        $this->state->finish(null, new TransportException('connection refused'), null, new HttpClientMetrics($histogram));
     }
 
     public function test_disabled_histogram_is_not_recorded(): void
@@ -386,7 +446,7 @@ final class HttpClientRequestStateTest extends TestCase
         $histogram->method('isEnabled')->willReturn(false);
         $histogram->expects($this->never())->method('record');
 
-        $this->state->finish($this->response(['http_code' => 200, 'total_time' => 0.1]), null, null, $histogram);
+        $this->state->finish($this->response(['http_code' => 200, 'total_time' => 0.1]), null, null, new HttpClientMetrics($histogram));
     }
 
     public function test_no_histogram_is_accepted(): void

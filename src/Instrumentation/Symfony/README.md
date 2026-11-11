@@ -59,6 +59,32 @@ number of retries.
 names can be redacted via the `OTEL_PHP_INSTRUMENTATION_URL_SANITIZE_FIELD_NAMES` environment
 variable (comma-separated, case-insensitive).
 
+### Peer service name
+
+`peer.service` can be assigned to outgoing requests from a mapping of host names or IP
+addresses to user-assigned service names, configured via
+`OTEL_INSTRUMENTATION_COMMON_PEER_SERVICE_MAPPING` as a comma-separated list of
+`<host_or_ip>=<user_assigned_name>` pairs. A mapping key may include a port and a path
+(`host:port/path`): a key without a port matches any port, and a key with a path matches
+request paths starting with it.
+
+```text
+OTEL_INSTRUMENTATION_COMMON_PEER_SERVICE_MAPPING=1.2.3.4=cats-service,dogs-abcdef123.serverlessapis.com:80/api=dogs-api
+```
+
+Requests to `1.2.3.4` then have a `peer.service` attribute of `cats-service`, and requests to
+`dogs-abcdef123.serverlessapis.com:80/api/v1` have `dogs-api`.
+
+### Experimental HTTP client metrics
+
+When `OTEL_INSTRUMENTATION_HTTP_CLIENT_EMIT_EXPERIMENTAL_TELEMETRY=true`, the instrumentation
+additionally records the experimental `http.client.request.body.size` and
+`http.client.response.body.size` histograms (unit `By`, using the same semantic convention
+attributes as the duration metric), and adds the `http.request.body.size` and
+`http.response.body.size` attributes to the CLIENT span. The response body size is the number
+of bytes received by the transport, falling back to the bytes observed through `on_progress`
+when the transport does not report it.
+
 ### Trace events
 
 Because `request()` only schedules the transfer and network I/O starts later (when the application

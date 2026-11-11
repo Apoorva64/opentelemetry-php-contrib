@@ -6,7 +6,6 @@ namespace OpenTelemetry\Contrib\Instrumentation\Symfony;
 
 use OpenTelemetry\API\Globals;
 use OpenTelemetry\API\Instrumentation\CachedInstrumentation;
-use OpenTelemetry\API\Metrics\HistogramInterface;
 use OpenTelemetry\API\Trace\SpanKind;
 use OpenTelemetry\Context\Context;
 use OpenTelemetry\Context\ContextInterface;
@@ -15,6 +14,8 @@ use OpenTelemetry\Context\Propagation\ArrayAccessGetterSetter;
 use function OpenTelemetry\Instrumentation\hook;
 use OpenTelemetry\SemConv\Attributes\CodeAttributes;
 use OpenTelemetry\SemConv\Attributes\HttpAttributes;
+use OpenTelemetry\SemConv\Incubating\Metrics\HttpIncubatingMetrics;
+use OpenTelemetry\SemConv\TraceAttributes;
 use OpenTelemetry\SemConv\Version;
 use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
@@ -53,7 +54,7 @@ final class HttpClientInstrumentation
 
     /** @var \WeakMap<ResponseInterface, HttpClientRequestState>|null */
     private static ?\WeakMap $responseStates = null;
-    private static ?HistogramInterface $durationHistogram = null;
+    private static ?HttpClientMetrics $metrics = null;
 
     public static function supportsProgress(string $class): bool
     {
@@ -102,18 +103,47 @@ final class HttpClientInstrumentation
             Version::VERSION_1_38_0->url(),
         );
 
-        self::registerRequestHook($instrumentation);
+        self::$metrics = self::createMetrics($instrumentation);
+        self::registerRequestHook($instrumentation, HttpClientPeerServiceResolver::fromEnvironment());
         self::registerResponseHooks();
-        self::$durationHistogram = $instrumentation->meter()->createHistogram(
+
+        // Responses still referenced at the end of the script are only destructed after all
+        // shutdown functions ran, i.e. after the SDK flushed and shut down its TracerProvider.
+        register_shutdown_function(self::endOpenSpans(...));
+    }
+
+    /**
+     * Creates the request duration histogram, and the experimental request/response body
+     * size histograms when experimental HTTP client telemetry is enabled.
+     *
+     * @see https://opentelemetry.io/docs/zero-code/java/agent/instrumentation/http/
+     */
+    private static function createMetrics(CachedInstrumentation $instrumentation): HttpClientMetrics
+    {
+        $duration = $instrumentation->meter()->createHistogram(
             'http.client.request.duration',
             's',
             'Duration of HTTP client requests.',
             ['ExplicitBucketBoundaries' => self::DURATION_BUCKETS],
         );
 
-        // Responses still referenced at the end of the script are only destructed after all
-        // shutdown functions ran, i.e. after the SDK flushed and shut down its TracerProvider.
-        register_shutdown_function(self::endOpenSpans(...));
+        if (!HttpClientMetrics::experimentalTelemetryEnabled()) {
+            return new HttpClientMetrics($duration);
+        }
+
+        return new HttpClientMetrics(
+            $duration,
+            $instrumentation->meter()->createHistogram(
+                HttpIncubatingMetrics::HTTP_CLIENT_REQUEST_BODY_SIZE,
+                'By',
+                'Size of HTTP client request bodies.',
+            ),
+            $instrumentation->meter()->createHistogram(
+                HttpIncubatingMetrics::HTTP_CLIENT_RESPONSE_BODY_SIZE,
+                'By',
+                'Size of HTTP client response bodies.',
+            ),
+        );
     }
 
     /**
@@ -124,11 +154,11 @@ final class HttpClientInstrumentation
     public static function endOpenSpans(): void
     {
         foreach (self::responseStates() as $response => $state) {
-            $state->finish($response, null, $state->lastActivity(), self::$durationHistogram);
+            $state->finish($response, null, $state->lastActivity(), self::$metrics);
         }
     }
 
-    private static function registerRequestHook(CachedInstrumentation $instrumentation): void
+    private static function registerRequestHook(CachedInstrumentation $instrumentation, HttpClientPeerServiceResolver $peerServiceResolver): void
     {
         /** @psalm-suppress UnusedFunctionCall */
         hook(
@@ -141,7 +171,7 @@ final class HttpClientInstrumentation
                 string $function,
                 ?string $filename,
                 ?int $lineno,
-            ) use ($instrumentation): array {
+            ) use ($instrumentation, $peerServiceResolver): array {
                 $parent = Context::getCurrent();
                 $request = sprintf('%s %s', $params[0], (string) $params[1]);
 
@@ -166,6 +196,10 @@ final class HttpClientInstrumentation
                     ->setAttribute(CodeAttributes::CODE_LINE_NUMBER, $lineno);
                 foreach (HttpClientRequestAttributes::forUrl((string) $params[1]) as $name => $value) {
                     $builder->setAttribute($name, $value);
+                }
+                $peerService = $peerServiceResolver->resolve((string) $params[1]);
+                if ($peerService !== null) {
+                    $builder->setAttribute(TraceAttributes::PEER_SERVICE, $peerService);
                 }
                 $span = $builder
                     ->setParent($parent)
@@ -225,7 +259,7 @@ final class HttpClientInstrumentation
                 }
 
                 if (null !== $exception || null === $response) {
-                    $state->finish(null, $exception, null, self::$durationHistogram);
+                    $state->finish(null, $exception, null, self::$metrics);
 
                     return;
                 }
@@ -236,7 +270,7 @@ final class HttpClientInstrumentation
                         $state->setStatusCode($response->getStatusCode());
                     } catch (\Throwable) {
                     }
-                    $state->finish($response, null, null, self::$durationHistogram);
+                    $state->finish($response, null, null, self::$metrics);
 
                     return;
                 }
@@ -285,18 +319,18 @@ final class HttpClientInstrumentation
             case 'getHeaders':
                 // Headers were read: keep the span open for the body, unless reading them failed.
                 if ($exception instanceof TransportExceptionInterface) {
-                    $state->finish($response, $exception, null, self::$durationHistogram);
+                    $state->finish($response, $exception, null, self::$metrics);
                 }
 
                 return;
             case '__destruct':
                 // The body was not (observably) consumed: end at the last transport activity rather
                 // than at cleanup time, unless sending the request from the destructor failed.
-                $state->finish($response, $exception, null === $exception ? $state->lastActivity() : null, self::$durationHistogram);
+                $state->finish($response, $exception, null === $exception ? $state->lastActivity() : null, self::$metrics);
 
                 return;
             case 'cancel':
-                $state->finish($response, $exception, null, self::$durationHistogram);
+                $state->finish($response, $exception, null, self::$metrics);
 
                 return;
             default:
@@ -305,7 +339,7 @@ final class HttpClientInstrumentation
                 $timestamp = $state->completedBeforeCall() && !$exception instanceof TransportExceptionInterface
                     ? $state->lastActivity()
                     : null;
-                $state->finish($response, $exception, $timestamp, self::$durationHistogram);
+                $state->finish($response, $exception, $timestamp, self::$metrics);
         }
     }
 

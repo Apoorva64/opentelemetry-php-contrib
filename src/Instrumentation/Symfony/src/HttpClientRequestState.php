@@ -13,6 +13,7 @@ use OpenTelemetry\SemConv\Attributes\HttpAttributes;
 use OpenTelemetry\SemConv\Attributes\NetworkAttributes;
 use OpenTelemetry\SemConv\Attributes\ServerAttributes;
 use OpenTelemetry\SemConv\Attributes\UrlAttributes;
+use OpenTelemetry\SemConv\Incubating\Attributes\HttpIncubatingAttributes;
 use Symfony\Contracts\HttpClient\Exception\HttpExceptionInterface;
 use Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
@@ -151,7 +152,7 @@ final class HttpClientRequestState
      *
      * @see https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpclientrequestduration
      */
-    public function finish(?ResponseInterface $response, ?\Throwable $exception = null, ?int $timestamp = null, ?HistogramInterface $durationHistogram = null): void
+    public function finish(?ResponseInterface $response, ?\Throwable $exception = null, ?int $timestamp = null, ?HttpClientMetrics $metrics = null): void
     {
         if ($this->ended) {
             return;
@@ -197,10 +198,18 @@ final class HttpClientRequestState
             $this->span->addEvent('http.receive', [], $this->lastActivity);
         }
 
-        // Final transport snapshot as attributes.
+        // Final transport snapshot as attributes. The experimental body-size attributes are
+        // only recorded when experimental HTTP client telemetry is enabled.
+        $responseBodySize = self::numeric($info['size_download'] ?? null) ?? ($this->downloaded >= 0 ? $this->downloaded : null);
+        $requestBodySize = self::numeric($info['size_upload'] ?? null);
         self::setIfPresent($this->span, 'http.response.content_type', $info['content_type'] ?? null);
         self::setIfPresent($this->span, 'http.response.redirect_count', $info['redirect_count'] ?? null);
-        self::setIfPresent($this->span, 'http.response.body.size', $info['size_download'] ?? null);
+        if ($metrics !== null && $metrics->responseBodySize !== null) {
+            self::setIfPresent($this->span, HttpIncubatingAttributes::HTTP_RESPONSE_BODY_SIZE, $responseBodySize);
+        }
+        if ($metrics !== null && $metrics->requestBodySize !== null) {
+            self::setIfPresent($this->span, HttpIncubatingAttributes::HTTP_REQUEST_BODY_SIZE, $requestBodySize > 0 ? $requestBodySize : null);
+        }
         self::setIfPresent($this->span, NetworkAttributes::NETWORK_PEER_ADDRESS, $info['primary_ip'] ?? null);
         self::setIfPresent($this->span, NetworkAttributes::NETWORK_PEER_PORT, $info['primary_port'] ?? null);
         self::setIfPresent($this->span, UrlAttributes::URL_SCHEME, isset($info['scheme']) ? strtolower((string) $info['scheme']) : null);
@@ -210,7 +219,7 @@ final class HttpClientRequestState
         // (RetryableHttpClient cancels failed attempts before retrying them).
         if (($info['canceled'] ?? false) === true && ($statusCode === null || $statusCode < 400)) {
             $this->span->end($timestamp);
-            $this->recordDuration($durationHistogram, $statusCode, $info, null);
+            $this->recordMetrics($metrics, $statusCode, $info, null, $requestBodySize, $responseBodySize);
 
             return;
         }
@@ -237,20 +246,18 @@ final class HttpClientRequestState
         }
 
         $this->span->end($timestamp);
-        $this->recordDuration($durationHistogram, $statusCode, $info, $errorType);
+        $this->recordMetrics($metrics, $statusCode, $info, $errorType, $requestBodySize, $responseBodySize);
     }
 
-    private function recordDuration(?HistogramInterface $histogram, ?int $statusCode, array $info, ?string $errorType): void
-    {
-        if ($histogram === null || !$histogram->isEnabled()) {
-            return;
-        }
-
-        // Elapsed transfer time as measured by the transport itself. It starts when the
-        // transfer actually begins (after any lazy queueing) and ends when it completes
-        // or fails, which is exactly the duration this metric describes.
-        $totalTime = $info['total_time'] ?? null;
-        if (!is_numeric($totalTime) || (float) $totalTime <= 0.0) {
+    private function recordMetrics(
+        ?HttpClientMetrics $metrics,
+        ?int $statusCode,
+        array $info,
+        ?string $errorType,
+        ?float $requestBodySize,
+        ?float $responseBodySize,
+    ): void {
+        if ($metrics === null) {
             return;
         }
 
@@ -265,7 +272,34 @@ final class HttpClientRequestState
             $attributes[NetworkAttributes::NETWORK_PROTOCOL_VERSION] = $this->httpVersion((int) $info['http_version']);
         }
 
-        $histogram->record((float) $totalTime, $attributes);
+        // Elapsed transfer time as measured by the transport itself. It starts when the
+        // transfer actually begins (after any lazy queueing) and ends when it completes
+        // or fails, which is exactly the duration this metric describes.
+        $totalTime = $info['total_time'] ?? null;
+        if (is_numeric($totalTime) && (float) $totalTime > 0.0) {
+            $this->recordIf($metrics->requestDuration, (float) $totalTime, $attributes);
+        }
+
+        // The number of bytes transferred excluding headers; there is no body to
+        // measure when no request body was uploaded.
+        if ($requestBodySize !== null && $requestBodySize > 0) {
+            $this->recordIf($metrics->requestBodySize, $requestBodySize, $attributes);
+        }
+        if ($responseBodySize !== null) {
+            $this->recordIf($metrics->responseBodySize, $responseBodySize, $attributes);
+        }
+    }
+
+    private function recordIf(?HistogramInterface $histogram, float $value, array $attributes): void
+    {
+        if ($histogram !== null && $histogram->isEnabled()) {
+            $histogram->record($value, $attributes);
+        }
+    }
+
+    private static function numeric(mixed $value): ?float
+    {
+        return is_numeric($value) ? (float) $value : null;
     }
 
     private static function responseInfo(?ResponseInterface $response): array
