@@ -51,3 +51,27 @@ The extension can be disabled via [runtime configuration](https://opentelemetry.
 ```shell
 OTEL_PHP_DISABLED_INSTRUMENTATIONS=symfony
 ```
+
+### Request URL sanitization
+
+`url.full` and `url.query` are redacted before they are recorded: userinfo in the authority is
+replaced with `REDACTED`, and the values of well-known sensitive query parameters (`token`,
+`api_key`, `access_token`, `password`, `secret`, …) are replaced with `REDACTED`. Additional
+parameter names can be redacted via the `OTEL_PHP_INSTRUMENTATION_URL_SANITIZE_FIELD_NAMES`
+environment variable (comma-separated, case-insensitive).
+
+### HTTP server metrics
+
+Each completed main request records the
+[`http.server.request.duration`](https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpserverrequestduration)
+histogram (unit `s`), with the semantic convention attributes (`http.request.method`,
+`http.route`, `server.address`, `server.port`, `url.scheme`, `http.response.status_code`,
+`network.protocol.version`, and `error.type` when the request errored). Unknown request
+methods are recorded as `_OTHER`.
+
+When `OTEL_INSTRUMENTATION_HTTP_SERVER_EMIT_EXPERIMENTAL_TELEMETRY=true`, the instrumentation
+additionally records the experimental `http.server.active_requests` counter (unit
+`{request}`, incremented while a request is being handled), and the experimental
+`http.server.request.body.size` and `http.server.response.body.size` histograms (unit `By`).
+The body sizes are taken from the `Content-Length` headers, or from the response content
+when it is buffered.
